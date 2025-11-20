@@ -8,6 +8,14 @@ catkin_python_setup()
 
 include(ze_setup)
 
+find_path(ELIS_LINK_INCLUDE_DIR elisUltimateLink/keypoint_service.hpp
+  PATHS "${PROJECT_SOURCE_DIR}/../elisUltimateLink/include"
+)
+if(ELIS_LINK_INCLUDE_DIR)
+  message(STATUS "ElisUltimateLink include dir: ${ELIS_LINK_INCLUDE_DIR}")
+  include_directories(${ELIS_LINK_INCLUDE_DIR})
+endif()
+
 #############
 # LIBRARIES #
 #############

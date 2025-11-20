@@ -13,3 +13,4 @@ DECLARE_uint64(vio_min_tracked_features_total);
 DECLARE_uint64(vio_max_tracked_features_per_frame);
 
 DECLARE_bool(vio_delayed_nframe_processing);
+DECLARE_bool(vio_use_elis_link);

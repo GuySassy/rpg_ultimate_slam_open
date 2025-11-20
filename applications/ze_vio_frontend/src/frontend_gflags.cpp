@@ -20,3 +20,5 @@ DEFINE_uint64(vio_max_tracked_features_per_frame, 120,
 // Backend:
 DEFINE_bool(vio_delayed_nframe_processing, true,
             "Optimize frame_km1 and not frame_k (SWE default).");
+DEFINE_bool(vio_use_elis_link, false,
+            "Use elis_code packet-driven frontend (requires ElisUltimateLink).");
