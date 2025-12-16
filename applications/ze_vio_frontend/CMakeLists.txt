@@ -1,5 +1,5 @@
+cmake_minimum_required(VERSION 3.0.2)
 project(ze_vio_frontend)
-cmake_minimum_required(VERSION 2.8.3)
 
 find_package(catkin_simple REQUIRED)
 catkin_simple(ALL_DEPS_REQUIRED)
@@ -78,15 +78,40 @@ if(ELIS_LINK_CORE_LIB)
   find_package(Python3 COMPONENTS Development QUIET)
   find_package(pybind11 QUIET)
   if(Python3_Development_FOUND)
-    target_link_libraries(${PROJECT_NAME} PRIVATE Python3::Python)
+    target_link_libraries(${PROJECT_NAME} Python3::Python)
   endif()
   if(pybind11_FOUND)
-    target_link_libraries(${PROJECT_NAME} PRIVATE pybind11::embed)
+    target_link_libraries(${PROJECT_NAME} pybind11::embed)
   endif()
-  target_link_libraries(${PROJECT_NAME} PRIVATE ${ELIS_LINK_CORE_LIB})
+  target_link_libraries(${PROJECT_NAME} ${ELIS_LINK_CORE_LIB})
   target_compile_definitions(${PROJECT_NAME} PRIVATE ELIS_LINK_ENABLED)
 else()
   message(STATUS "ElisUltimateLink core lib not found at ${ELIS_LINK_BUILD_DIR}; building without ELIS_LINK support.")
+endif()
+
+# Optional frontend sanity test when Elis link is available.
+if(ELIS_LINK_CORE_LIB)
+  enable_testing()
+  find_package(GTest QUIET)
+  if(GTest_FOUND)
+    add_executable(test_elis_link_enabled test/test_elis_link_enabled.cpp)
+    target_link_libraries(test_elis_link_enabled
+      ${PROJECT_NAME}
+      ${ELIS_LINK_CORE_LIB}
+      ${catkin_LIBRARIES}
+      GTest::GTest
+      GTest::Main)
+    if(pybind11_FOUND)
+      target_link_libraries(test_elis_link_enabled pybind11::embed)
+    endif()
+    if(Python3_Development_FOUND)
+      target_link_libraries(test_elis_link_enabled Python3::Python)
+    endif()
+    target_compile_definitions(test_elis_link_enabled PRIVATE ELIS_LINK_ENABLED)
+    add_test(NAME elis_link_frontend_flag_test COMMAND test_elis_link_enabled)
+  else()
+    message(STATUS "GTest not found; skipping test_elis_link_enabled")
+  endif()
 endif()
 
 ##########
