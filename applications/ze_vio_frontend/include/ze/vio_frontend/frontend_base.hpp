@@ -44,6 +44,7 @@ class ImuIntegrator;
 class NFrame;
 class StereoMatcher;
 class VioVisualizer;
+struct ElisLinkState;
 
 // callback declarations.
 using TrackedNFrameCallback =
@@ -123,6 +124,7 @@ public:
       const std::vector<std::pair<int64_t, ImageBase::Ptr>>& stamped_images);
 
   std::pair<std::vector<real_t>, uint32_t> trackFrameKLT();
+  std::pair<std::vector<real_t>, uint32_t> trackFrameElisLink();
 
   /// \brief Adds given imu measurements to members imu_stamps_since_lkf
   /// and imu_accgyr_since_lkf.
@@ -233,6 +235,8 @@ protected:
 
   Ringbuffer<real_t, 6, 1000> imu_buffer_;
   Odometry odom_;
+
+  std::unique_ptr<ElisLinkState> elis_link_state_;
 
   //! @name Threading:
   //! @{

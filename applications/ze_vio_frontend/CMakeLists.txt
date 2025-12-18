@@ -167,10 +167,12 @@ if(ELIS_LINK_CORE_LIB)
     list(APPEND MV_ALL_LIBS ${MV_DRIVER_LIB})
     list(APPEND MV_ALL_INCLUDES ${MV_DRIVER_INCLUDE_DIR})
   endif()
-  if(MV_ALL_LIBS AND MV_ALL_INCLUDES)
+  if(MV_ALL_LIBS)
     set(HAVE_METAVISION_SDK ON)
-    message(STATUS "MV: Harness will use manual/linkable Metavision libs: ${MV_ALL_LIBS}")
-    message(STATUS "MV: Harness include dirs: ${MV_ALL_INCLUDES}")
+    message(STATUS "MV: Harness will use linkable Metavision libs: ${MV_ALL_LIBS}")
+    if(MV_ALL_INCLUDES)
+      message(STATUS "MV: Harness include dirs: ${MV_ALL_INCLUDES}")
+    endif()
   else()
     message(STATUS "Metavision SDK (C++) not found; elis_link_harness will skip RAW loading via C++ API.")
   endif()
@@ -186,6 +188,23 @@ if(ELIS_LINK_CORE_LIB)
     target_compile_definitions(elis_link_harness PRIVATE HAVE_METAVISION_SDK)
   endif()
   target_compile_definitions(elis_link_harness PRIVATE ELIS_LINK_ENABLED)
+
+  # Always build elis_link_playback; it will emit a clear runtime message if the
+  # Metavision SDK is not available. This avoids stale binaries when toggling
+  # SDK availability across builds.
+  add_executable(elis_link_playback src/elis_link_playback.cpp)
+  target_link_libraries(elis_link_playback
+    ${PROJECT_NAME}
+    ${ELIS_LINK_CORE_LIB}
+    ${catkin_LIBRARIES})
+  target_compile_definitions(elis_link_playback PRIVATE ELIS_LINK_ENABLED)
+  if(HAVE_METAVISION_SDK)
+    target_link_libraries(elis_link_playback ${MV_ALL_LIBS})
+    if(MV_ALL_INCLUDES)
+      target_include_directories(elis_link_playback PRIVATE ${MV_ALL_INCLUDES})
+    endif()
+    target_compile_definitions(elis_link_playback PRIVATE HAVE_METAVISION_SDK)
+  endif()
 endif()
 
 ##########

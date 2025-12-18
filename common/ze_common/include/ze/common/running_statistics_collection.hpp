@@ -88,8 +88,19 @@ public:
   //! Saves statistics to file in YAML format.
   void saveToFile(const std::string& directory, const std::string& filename)
   {
+    if (directory.empty())
+    {
+      LOG(WARNING) << "StatisticsCollection::saveToFile: directory is empty "
+                   << "(skipping save of " << filename << ")";
+      return;
+    }
+    if (!isDir(directory))
+    {
+      LOG(WARNING) << "StatisticsCollection::saveToFile: directory does not exist: "
+                   << directory << " (skipping save of " << filename << ")";
+      return;
+    }
     std::ofstream fs;
-    CHECK(isDir(directory));
     openOutputFileStream(joinPath(directory, filename), &fs);
     fs << *this;
   }

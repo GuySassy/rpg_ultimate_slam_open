@@ -97,8 +97,19 @@ public:
   //! Saves timings to file in YAML format.
   inline void saveToFile(const std::string& directory, const std::string& filename) const
   {
+    if (directory.empty())
+    {
+      LOG(WARNING) << "TimerCollection::saveToFile: directory is empty "
+                   << "(skipping save of " << filename << ")";
+      return;
+    }
+    if (!isDir(directory))
+    {
+      LOG(WARNING) << "TimerCollection::saveToFile: directory does not exist: "
+                   << directory << " (skipping save of " << filename << ")";
+      return;
+    }
     std::ofstream fs;
-    CHECK(isDir(directory));
     openOutputFileStream(joinPath(directory, filename), &fs);
     fs << *this;
   }

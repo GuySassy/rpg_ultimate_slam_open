@@ -33,6 +33,13 @@
 #include <ze/vio_frontend/track_extractor.hpp>
 #include <ze/visualization/viz_ros.hpp>
 
+#ifdef ELIS_LINK_ENABLED
+#include <elisUltimateLink/frame_populator.hpp>
+#include <elisUltimateLink/keypoint_service.hpp>
+#endif
+
+#include <unordered_map>
+
 DEFINE_bool(vio_activate_backend, true,
             "Use visual-inertial backend.");
 DEFINE_int32(vio_add_every_nth_frame_to_backend, -1,
@@ -67,6 +74,203 @@ DEFINE_double(vio_frame_norm_factor, 3.0,
               "Normalization factor for event frames");
 
 namespace ze {
+
+struct ElisLinkState
+{
+#ifdef ELIS_LINK_ENABLED
+  elis_link::ElisKeypointService service;
+  elis_link::KeypointServiceConfig service_config;
+  bool configured = false;
+  std::unordered_map<int32_t, ze::LandmarkHandle> track_to_handle;
+  int64_t t0_ns = -1;
+#endif
+};
+
+namespace {
+
+#ifdef ELIS_LINK_ENABLED
+bool ensure_elis_configured(ElisLinkState& state)
+{
+  if (state.configured)
+  {
+    return true;
+  }
+
+  try
+  {
+    state.service.configure(state.service_config);
+    state.configured = true;
+    return true;
+  }
+  catch (const std::exception& e)
+  {
+    LOG(ERROR) << "ElisKeypointService configure failed: " << e.what();
+    return false;
+  }
+}
+
+bool populate_frame_from_elis(const EventArray& events,
+                              const Camera& cam,
+                              const uint32_t nframe_seq,
+                              Frame& frame,
+                              LandmarkTable& landmarks,
+                              ElisLinkState& state)
+{
+  if (events.empty())
+  {
+    return false;
+  }
+
+  if (!ensure_elis_configured(state))
+  {
+    return false;
+  }
+
+  std::vector<int32_t> xs;
+  std::vector<int32_t> ys;
+  std::vector<float> ts_us;
+  std::vector<int32_t> ps;
+  xs.reserve(events.size());
+  ys.reserve(events.size());
+  ts_us.reserve(events.size());
+  ps.reserve(events.size());
+
+  if (state.t0_ns < 0)
+  {
+    state.t0_ns = events.front().ts.toNSec();
+  }
+  const int64_t t0_ns = state.t0_ns;
+  for (const dvs_msgs::Event& ev : events)
+  {
+    xs.push_back(static_cast<int32_t>(ev.x));
+    ys.push_back(static_cast<int32_t>(ev.y));
+    ts_us.push_back(static_cast<float>(ev.ts.toNSec() - t0_ns) * 1e-3f);
+    ps.push_back(ev.polarity ? 1 : 0);
+  }
+
+  elis_link::KeypointPacket packet;
+  try
+  {
+    packet = state.service.process_batch(xs, ys, ts_us, ps);
+  }
+  catch (const std::exception& e)
+  {
+    LOG(ERROR) << "ElisKeypointService process_batch failed: " << e.what();
+    return false;
+  }
+
+  if (packet.empty())
+  {
+    VLOG(1) << "ElisKeypointService returned empty packet.";
+    frame.num_features_ = 0u;
+    frame.seeds_index_from_ = 0u;
+    frame.seeds_index_to_ = 0u;
+    return true;
+  }
+
+  // Ensure depth priors are set (used for seed initialization later).
+  frame.min_depth_ = FLAGS_vio_min_depth;
+  frame.max_depth_ = FLAGS_vio_max_depth;
+  frame.median_depth_ = FLAGS_vio_median_depth;
+  frame.seeds_mean_range_ = real_t{2} / frame.min_depth_;
+  Seed seed_prototype;
+  seed_prototype << real_t{1} / frame.median_depth_,
+                    frame.seeds_mean_range_, 10, 10;
+
+  // Allocate (or re-allocate) landmark handles for unseen/invalid tracks.
+  std::vector<int32_t> missing_track_ids;
+  missing_track_ids.reserve(packet.track_ids.size());
+  for (const int32_t track_id : packet.track_ids)
+  {
+    auto it = state.track_to_handle.find(track_id);
+    if (it == state.track_to_handle.end())
+    {
+      missing_track_ids.push_back(track_id);
+      continue;
+    }
+    const LandmarkHandle h = it->second;
+    if (!landmarks.isStored(h, true) || isLandmarkInactive(landmarks.type(h)))
+    {
+      missing_track_ids.push_back(track_id);
+    }
+  }
+
+  if (!missing_track_ids.empty())
+  {
+    const LandmarkHandles new_handles =
+        landmarks.getNewLandmarkHandles(static_cast<uint32_t>(missing_track_ids.size()),
+                                        nframe_seq);
+    for (size_t i = 0; i < missing_track_ids.size(); ++i)
+    {
+      const int32_t track_id = missing_track_ids[i];
+      const LandmarkHandle h = new_handles[i];
+      state.track_to_handle[track_id] = h;
+      landmarks.seed(h) = seed_prototype;
+    }
+  }
+
+  // Build FrameFeatureData (pads descriptors to 64 bytes by default).
+  const elis_link::FrameFeatureData data =
+      elis_link::make_frame_feature_data(packet, elis_link::FramePopulationConfig{});
+
+  const std::size_t count = packet.size();
+  frame.ensureFeatureCapacity(static_cast<uint32_t>(count));
+  frame.descriptors_.resize(static_cast<int>(data.descriptors.rows()),
+                            static_cast<int>(count));
+
+  // Order features so that all "seed" handles (obs empty) are at the end.
+  std::vector<uint32_t> nonseed_idx;
+  std::vector<uint32_t> seed_idx;
+  nonseed_idx.reserve(count);
+  seed_idx.reserve(count);
+  for (uint32_t i = 0; i < static_cast<uint32_t>(count); ++i)
+  {
+    const int32_t track_id = packet.track_ids[i];
+    const LandmarkHandle h = state.track_to_handle.at(track_id);
+    const bool needs_seed_obs = landmarks.obs(h).empty();
+    if (needs_seed_obs)
+    {
+      seed_idx.push_back(i);
+    }
+    else
+    {
+      nonseed_idx.push_back(i);
+    }
+  }
+
+  std::vector<uint32_t> order;
+  order.reserve(count);
+  order.insert(order.end(), nonseed_idx.begin(), nonseed_idx.end());
+  order.insert(order.end(), seed_idx.begin(), seed_idx.end());
+
+  // Populate frame storage.
+  for (uint32_t j = 0; j < static_cast<uint32_t>(count); ++j)
+  {
+    const uint32_t i = order[j];
+    frame.px_vec_.col(j) = data.keypoints_px.col(i).cast<real_t>();
+    frame.level_vec_(j) = 0;
+    frame.type_vec_(j) = 0;
+    frame.angle_vec_(j) = 0.0;
+    frame.score_vec_(j) = data.strengths(static_cast<int>(i));
+    frame.descriptors_.col(j) = data.descriptors.col(static_cast<int>(i));
+
+    const int32_t track_id = packet.track_ids[i];
+    frame.landmark_handles_[j] = state.track_to_handle.at(track_id);
+  }
+
+  frame.num_features_ = static_cast<uint32_t>(count);
+  frame.seeds_index_from_ = static_cast<uint32_t>(nonseed_idx.size());
+  frame.seeds_index_to_ = frame.num_features_;
+
+  // Compute bearing vectors for all features.
+  frame.f_vec_.leftCols(frame.num_features_) =
+      cam.backProjectVectorized(frame.px_vec_.leftCols(frame.num_features_));
+
+  return true;
+}
+#endif  // ELIS_LINK_ENABLED
+
+}  // namespace
 
 // -----------------------------------------------------------------------------
 FrontendBase::FrontendBase()
@@ -359,7 +563,7 @@ void FrontendBase::processData(
           T_W_B.getEigenQuaternion().cast<double>(),
           T_W_B.getPosition().cast<double>(),
           stage_,
-          0u //! @todo: return num tracked keypoints!
+          nframe_k->getNumKeypoints()
           );
   }
 
@@ -473,40 +677,49 @@ void FrontendBase::processData(
   }
   else
   {
-    auto t = timers_[Timer::draw_events].timeScope();
-
-    // Build event frame with fixed number of events
-    const size_t winsize_events = FLAGS_vio_frame_size;
-    VLOG(10) << "Window size: " << winsize_events << " events";
-
-    int first_idx = std::max((int)events_ptr->size() - (int) winsize_events, 0);
-
-    uint64_t frame_length =
-        events_ptr->back().ts.toNSec() - events_ptr->at(first_idx).ts.toNSec();
-    stats_[Stats::frame_length].addSample(frame_length);
-
-    if(events_ptr->size() < winsize_events)
+    if (!FLAGS_vio_use_elis_link)
     {
-      VLOG(1) << "Requested frame size of length " << winsize_events
-                   << " events, but I only have "
-                   << events_ptr->size()
-                   << " events in the last event array";
+      auto t = timers_[Timer::draw_events].timeScope();
+
+      // Build event frame with fixed number of events
+      const size_t winsize_events = FLAGS_vio_frame_size;
+      VLOG(10) << "Window size: " << winsize_events << " events";
+
+      int first_idx = std::max((int)events_ptr->size() - (int) winsize_events, 0);
+
+      uint64_t frame_length =
+          events_ptr->back().ts.toNSec() - events_ptr->at(first_idx).ts.toNSec();
+      stats_[Stats::frame_length].addSample(frame_length);
+
+      if(events_ptr->size() < winsize_events)
+      {
+        VLOG(1) << "Requested frame size of length " << winsize_events
+                     << " events, but I only have "
+                     << events_ptr->size()
+                     << " events in the last event array";
+      }
+
+      Transformation T_1_0 = T_C_B_[0] * T_Bkm1_Bk.inverse() * T_C_B_[0].inverse();
+
+      drawEvents(
+        events_ptr->begin()+first_idx,
+        events_ptr->end(),
+        t0, t1,
+        T_1_0,
+        event_img);
+
+      const float bmax = FLAGS_vio_frame_norm_factor;
+      event_img.convertTo(event_img, CV_8U, 255./bmax);
+      //cv::normalize(event_img, event_img, 0, 255, cv::NORM_MINMAX, CV_8U);
+
+      dvs_img_ = event_img;
     }
-
-    Transformation T_1_0 = T_C_B_[0] * T_Bkm1_Bk.inverse() * T_C_B_[0].inverse();
-
-    drawEvents(
-      events_ptr->begin()+first_idx,
-      events_ptr->end(),
-      t0, t1,
-      T_1_0,
-      event_img);
-
-    const float bmax = FLAGS_vio_frame_norm_factor;
-    event_img.convertTo(event_img, CV_8U, 255./bmax);
-    //cv::normalize(event_img, event_img, 0, 255, cv::NORM_MINMAX, CV_8U);
-
-    dvs_img_ = event_img;
+    else
+    {
+      // ELIS link path does not require an event image; keep a black frame to
+      // satisfy NFrame construction and avoid drawEvents() LUT assumptions.
+      dvs_img_ = cv::Mat::zeros(rig_->at(0).height(), rig_->at(0).width(), CV_8U);
+    }
   }
 
 
@@ -523,6 +736,26 @@ void FrontendBase::processData(
   NFrame::Ptr nframe_k = createNFrame(stamped_images);
   VLOG(3) << " =============== Frame " << nframe_k->seq() << " - "
           << nframe_k->handle() << " ===============";
+
+#ifdef ELIS_LINK_ENABLED
+  const bool use_elis_link = FLAGS_vio_use_elis_link;
+  if (use_elis_link)
+  {
+    if (!elis_link_state_)
+    {
+      elis_link_state_ = std::make_unique<ElisLinkState>();
+    }
+
+    // For event-only rigs, the DVS camera is expected to be camera index 0.
+    // Use the rig camera to back-project keypoints.
+    (void)populate_frame_from_elis(*events_ptr,
+                                   rig_->at(0),
+                                   static_cast<uint32_t>(nframe_k->seq()),
+                                   nframe_k->at(0),
+                                   landmarks_,
+                                   *elis_link_state_);
+  }
+#endif
 
   // Predict pose of current frame by integrating the gyroscope:
   if (states_.nframeKm1())
@@ -562,7 +795,10 @@ void FrontendBase::processData(
     {
       // Extract feature descriptors.
       auto t = timers_[Timer::descriptor_extraction].timeScope();
-      feature_initializer_->extractFeatureDescriptors(*nframe_k);
+      if (!FLAGS_vio_use_elis_link)
+      {
+        feature_initializer_->extractFeatureDescriptors(*nframe_k);
+      }
     }
 
     if (FLAGS_vio_activate_backend)
@@ -590,7 +826,7 @@ void FrontendBase::processData(
           T_W_B.getEigenQuaternion().cast<double>(),
           T_W_B.getPosition().cast<double>(),
           stage_,
-          0u //! @todo: return num tracked keypoints!
+          nframe_k->getNumKeypoints()
           );
   }
 
@@ -850,7 +1086,7 @@ void FrontendBase::processData(
           T_W_B.getEigenQuaternion().cast<double>(),
           T_W_B.getPosition().cast<double>(),
           stage_,
-          0u //! @todo: return num tracked keypoints!
+          nframe_k->getNumKeypoints()
           );
   }
 
@@ -910,8 +1146,21 @@ void FrontendBase::drawEvents(
       dt = static_cast<float>(t1 - e->ts.toNSec()) / (t1 - t0);
     }
 
+    const int x = static_cast<int>(e->x);
+    const int y = static_cast<int>(e->y);
+    if (x < 0 || y < 0 || x >= width || y >= height)
+    {
+      continue;
+    }
+
+    const int idx = x + y * width;
+    if (idx < 0 || idx >= rig_->dvs_keypoint_lut_.cols())
+    {
+      continue;
+    }
+
     Eigen::Vector4f f;
-    f.head<2>() = rig_->dvs_keypoint_lut_.col(e->x + e->y * width);
+    f.head<2>() = rig_->dvs_keypoint_lut_.col(idx);
     f[2] = 1.;
     f[3] = 1./depth;
 
@@ -990,6 +1239,42 @@ std::pair<std::vector<real_t>, uint32_t> FrontendBase::trackFrameKLT()
   // Set last observation in landmarks:
   setLandmarksLastObservationInNFrame(*nframe_k, landmarks_);
 
+  return std::make_pair(disparities_sq, num_outliers);
+}
+
+//------------------------------------------------------------------------------
+std::pair<std::vector<real_t>, uint32_t> FrontendBase::trackFrameElisLink()
+{
+  NFrame::Ptr nframe_k = states_.nframeK();
+  NFrame::Ptr nframe_lkf = states_.nframeLkf();
+
+  if (!nframe_k || !nframe_lkf)
+  {
+    return std::make_pair(std::vector<real_t>{}, 0u);
+  }
+
+  std::vector<real_t> disparities_sq;
+  uint32_t num_outliers = 0u;
+
+  Transformation T_Bk_Blkf = states_.T_Bk_W() * states_.T_Blkf_W().inverse();
+  for (size_t frame_idx = 0u; frame_idx < nframe_k->size(); ++frame_idx)
+  {
+    num_outliers += feature_tracker_->ransacRelativePoseOutlierRejection(
+                      static_cast<uint32_t>(frame_idx),
+                      static_cast<uint32_t>(frame_idx),
+                      *nframe_lkf,
+                      *nframe_k,
+                      disparities_sq,
+                      T_Bk_Blkf).first;
+  }
+
+  // In event-only playback (no IMU/backend), update the pose from the relative pose estimate.
+  if (FLAGS_num_imus == 0u && !FLAGS_vio_activate_backend)
+  {
+    states_.T_Bk_W() = T_Bk_Blkf * states_.T_Blkf_W();
+  }
+
+  setLandmarksLastObservationInNFrame(*nframe_k, landmarks_);
   return std::make_pair(disparities_sq, num_outliers);
 }
 
@@ -1108,6 +1393,9 @@ void FrontendBase::reset()
   frame_count_ = -1;
   attitude_init_count_ = 0;
   stage_ = FrontendStage::AttitudeEstimation;
+#ifdef ELIS_LINK_ENABLED
+  elis_link_state_.reset();
+#endif
 }
 
 // -----------------------------------------------------------------------------

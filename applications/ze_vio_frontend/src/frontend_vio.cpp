@@ -54,6 +54,14 @@ void FrontendVio::processData(const Transformation& T_Bkm1_Bk)
   NFrame::Ptr nframe_k   = states_.nframeK();
   NFrame::Ptr nframe_lkf = states_.nframeLkf();
   bool add_frame_to_backend = (frame_count_ % FLAGS_vio_add_every_nth_frame_to_backend == 0);
+  bool use_elis_link = FLAGS_vio_use_elis_link;
+#ifndef ELIS_LINK_ENABLED
+  if (use_elis_link)
+  {
+    LOG(WARNING) << "vio_use_elis_link requested but ELIS_LINK_ENABLED is not set; falling back to legacy frontend.";
+  }
+  use_elis_link = false;
+#endif
 
   switch(stage_)
   {
@@ -65,7 +73,14 @@ void FrontendVio::processData(const Transformation& T_Bkm1_Bk)
       // KLT-Tracking of features and RANSAC:
       std::vector<real_t> disparities_sq;
       uint32_t num_outliers;
-      std::tie(disparities_sq, num_outliers) = trackFrameKLT();
+      if (use_elis_link)
+      {
+        std::tie(disparities_sq, num_outliers) = trackFrameElisLink();
+      }
+      else
+      {
+        std::tie(disparities_sq, num_outliers) = trackFrameKLT();
+      }
       uint32_t num_tracked = disparities_sq.size();
 
       motion_type_ = classifyMotion(disparities_sq, num_outliers);
@@ -97,14 +112,26 @@ void FrontendVio::processData(const Transformation& T_Bkm1_Bk)
         frame.max_depth_ = FLAGS_vio_max_depth;
         frame.median_depth_ = FLAGS_vio_median_depth;
       }
-      feature_initializer_->detectAndInitializeNewFeatures(
-            *nframe_k, range(rig_->size()));
+      if (!use_elis_link)
+      {
+        feature_initializer_->detectAndInitializeNewFeatures(
+              *nframe_k, range(rig_->size()));
+      }
 
       //if (rig_->size() > 1u)
         //stereo_matcher_->matchStereoAndRejectOutliers(*nframe_k, states_.T_Bk_W());
 
       // Add observations to landmarks.
       addLandmarkObservations(*nframe_k, landmarks_);
+
+      // When running without a backend (e.g., offline playback), there may be
+      // no prior keyframe set by AttitudeEstimation/backend updates. Ensure the
+      // current frame is set as the first keyframe so the Running stage can
+      // track against a valid last-keyframe handle.
+      if (!isValidNFrameHandle(states_.nframeHandleLkf()))
+      {
+        states_.setKeyframe(nframe_k->handle());
+      }
 
       // Switch state:
       stage_ = FrontendStage::Running;
@@ -153,7 +180,8 @@ void FrontendVio::makeKeyframeIfNecessary(const uint32_t num_tracked)
         *nframe_k, LandmarkType::Opportunistic, landmarks_);
 
   // Detect new features.
-  if (num_tracked < FLAGS_vio_min_tracked_features_total)
+  if (!FLAGS_vio_use_elis_link
+      && num_tracked < FLAGS_vio_min_tracked_features_total)
   {
     auto t = timers_[Timer::initialize_features].timeScope();
 

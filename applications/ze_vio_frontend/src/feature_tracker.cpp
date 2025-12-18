@@ -296,6 +296,14 @@ std::pair<uint32_t, IndexMatches> FeatureTracker::ransacRelativePoseOutlierRejec
         frame_ref.getLandmarkHandlesAsVector(),
         std::bind(&isValidLandmarkHandleType, std::placeholders::_1));
 
+  const std::size_t min_matches = use_5pt_ransac_ ? 5u : 2u;
+  if (indices_cur_ref.size() < min_matches)
+  {
+    VLOG(3) << "RANSAC: not enough matches (" << indices_cur_ref.size()
+            << " < " << min_matches << ").";
+    return std::make_pair(0u, indices_cur_ref);
+  }
+
   // Collect all matching bearing vectors.
   BearingsVector f_cur, f_ref;
   f_cur.reserve(indices_cur_ref.size());
