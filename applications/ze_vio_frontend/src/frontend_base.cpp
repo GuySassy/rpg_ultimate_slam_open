@@ -4,6 +4,7 @@
 #include <ze/vio_frontend/frontend_base.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <gflags/gflags.h>
 
@@ -73,6 +74,15 @@ DEFINE_int32(noise_event_rate, 20000,
 DEFINE_double(vio_frame_norm_factor, 3.0,
               "Normalization factor for event frames");
 
+DEFINE_bool(vio_elis_link_diag, false,
+            "Print ELIS track-id continuity diagnostics per slice (ID overlap + displacement).");
+DEFINE_string(vio_elis_detection_mode, "harris",
+              "elis_code keypoint detector mode: harris|snn|cpp.");
+DEFINE_int32(vio_elis_tracking_distance_px, 15,
+             "elis_code max pixel distance for ID tracking across slices.");
+DEFINE_int32(vio_elis_min_track_length, 3,
+             "elis_code minimum track length for stable IDs.");
+
 namespace ze {
 
 struct ElisLinkState
@@ -82,6 +92,7 @@ struct ElisLinkState
   elis_link::KeypointServiceConfig service_config;
   bool configured = false;
   std::unordered_map<int32_t, ze::LandmarkHandle> track_to_handle;
+  std::unordered_map<int32_t, std::pair<float, float>> prev_track_px;
   int64_t t0_ns = -1;
 #endif
 };
@@ -98,6 +109,9 @@ bool ensure_elis_configured(ElisLinkState& state)
 
   try
   {
+    state.service_config.detection_mode = FLAGS_vio_elis_detection_mode;
+    state.service_config.tracking_distance_px = FLAGS_vio_elis_tracking_distance_px;
+    state.service_config.min_track_length = FLAGS_vio_elis_min_track_length;
     state.service.configure(state.service_config);
     state.configured = true;
     return true;
@@ -168,6 +182,51 @@ bool populate_frame_from_elis(const EventArray& events,
     return true;
   }
 
+  const bool diag_enabled = FLAGS_vio_elis_link_diag;
+  std::unordered_map<int32_t, std::pair<float, float>> diag_curr_track_px;
+  std::size_t diag_overlap_prev = 0u;
+  float diag_median_disp_px = 0.0f;
+  float diag_max_disp_px = 0.0f;
+  const int64_t diag_slice_start_us =
+      (events.front().ts.toNSec() - state.t0_ns) / 1000;
+  const int64_t diag_slice_end_us =
+      (events.back().ts.toNSec() - state.t0_ns) / 1000;
+  const int64_t diag_slice_span_us = diag_slice_end_us - diag_slice_start_us;
+
+  if (diag_enabled)
+  {
+    diag_curr_track_px.reserve(packet.size());
+    for (std::size_t i = 0; i < packet.size(); ++i)
+    {
+      diag_curr_track_px[packet.track_ids[i]] = {packet.x_px[i], packet.y_px[i]};
+    }
+
+    std::vector<float> displacements;
+    displacements.reserve(std::min(diag_curr_track_px.size(), state.prev_track_px.size()));
+    for (const auto& kv : diag_curr_track_px)
+    {
+      const int32_t track_id = kv.first;
+      const std::pair<float, float>& curr_px = kv.second;
+      const auto it = state.prev_track_px.find(track_id);
+      if (it == state.prev_track_px.end())
+      {
+        continue;
+      }
+      ++diag_overlap_prev;
+      const float dx = curr_px.first - it->second.first;
+      const float dy = curr_px.second - it->second.second;
+      const float dist = std::sqrt(dx * dx + dy * dy);
+      displacements.push_back(dist);
+      diag_max_disp_px = std::max(diag_max_disp_px, dist);
+    }
+
+    if (!displacements.empty())
+    {
+      std::sort(displacements.begin(), displacements.end());
+      diag_median_disp_px = displacements[displacements.size() / 2u];
+    }
+  }
+
   // Ensure depth priors are set (used for seed initialization later).
   frame.min_depth_ = FLAGS_vio_min_depth;
   frame.max_depth_ = FLAGS_vio_max_depth;
@@ -180,19 +239,63 @@ bool populate_frame_from_elis(const EventArray& events,
   // Allocate (or re-allocate) landmark handles for unseen/invalid tracks.
   std::vector<int32_t> missing_track_ids;
   missing_track_ids.reserve(packet.track_ids.size());
+  std::size_t missing_new = 0u;
+  std::size_t missing_invalid_handle = 0u;
+  std::size_t missing_inactive = 0u;
+  std::size_t missing_not_stored = 0u;
   for (const int32_t track_id : packet.track_ids)
   {
     auto it = state.track_to_handle.find(track_id);
     if (it == state.track_to_handle.end())
     {
       missing_track_ids.push_back(track_id);
+      ++missing_new;
       continue;
     }
     const LandmarkHandle h = it->second;
-    if (!landmarks.isStored(h, true) || isLandmarkInactive(landmarks.type(h)))
+    if (!isValidLandmarkHandle(h))
     {
       missing_track_ids.push_back(track_id);
+      ++missing_invalid_handle;
+      continue;
     }
+    if (isLandmarkInactive(landmarks.type(h)))
+    {
+      missing_track_ids.push_back(track_id);
+      ++missing_inactive;
+      continue;
+    }
+    if (!landmarks.isStored(h, true))
+    {
+      // This should not happen during normal operation because handles are
+      // allocated from LandmarkTable. Keep the mapping stable for tracking, but
+      // surface the issue via diagnostics.
+      ++missing_not_stored;
+    }
+  }
+
+  if (diag_enabled)
+  {
+    const std::size_t curr_unique_ids = diag_curr_track_px.size();
+    const std::size_t prev_unique_ids = state.prev_track_px.size();
+    const std::size_t new_ids = curr_unique_ids - diag_overlap_prev;
+    LOG(INFO) << "[ELIS][diag] frame_seq=" << nframe_seq
+              << " keypoints=" << packet.size()
+              << " ids(curr_unique=" << curr_unique_ids
+              << " prev_unique=" << prev_unique_ids
+              << " overlap=" << diag_overlap_prev
+              << " new=" << new_ids << ")"
+              << " handles_reallocated=" << missing_track_ids.size()
+              << " missing(new=" << missing_new
+              << " invalid_handle=" << missing_invalid_handle
+              << " inactive=" << missing_inactive
+              << " not_stored=" << missing_not_stored << ")"
+              << " slice_span_us=" << diag_slice_span_us
+              << " median_disp_px=" << diag_median_disp_px
+              << " max_disp_px=" << diag_max_disp_px
+              << " elis_proc_ms=" << packet.processing_time_ms
+              << " elis_mode=" << packet.detection_mode;
+    state.prev_track_px.swap(diag_curr_track_px);
   }
 
   if (!missing_track_ids.empty())
