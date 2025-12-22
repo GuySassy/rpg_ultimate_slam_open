@@ -274,7 +274,58 @@ bool populate_frame_from_elis(const EventArray& events,
   const elis_link::FrameFeatureData data =
       elis_link::make_frame_feature_data(packet, elis_link::FramePopulationConfig{});
 
-  const std::size_t count = packet.size();
+  const std::size_t packet_count = packet.size();
+
+  if (packet.track_ids.size() != packet_count)
+  {
+    LOG(ERROR) << "ElisKeypointService returned inconsistent packet sizes: "
+               << "x_px=" << packet.x_px.size()
+               << " track_ids=" << packet.track_ids.size();
+    return false;
+  }
+
+  // Ensure each landmark handle appears at most once per frame. UltimateSLAM's
+  // landmark observation code assumes only a single "seed" observation is added
+  // for a freshly created landmark handle (obs is empty). If multiple keypoints
+  // share the same handle, the second seed observation would trip a CHECK.
+  //
+  // Duplicates should not happen in a healthy ELIS adapter (track_ids are
+  // expected to be unique), but we defensively keep the strongest keypoint per
+  // handle and drop the rest.
+  std::unordered_map<LandmarkHandle::value_t, uint32_t> best_by_handle;
+  best_by_handle.reserve(packet_count);
+  for (uint32_t i = 0; i < static_cast<uint32_t>(packet_count); ++i)
+  {
+    const int32_t track_id = packet.track_ids[i];
+    const LandmarkHandle h = state.track_to_handle.at(track_id);
+    const auto it = best_by_handle.find(h.handle);
+    if (it == best_by_handle.end())
+    {
+      best_by_handle.emplace(h.handle, i);
+      continue;
+    }
+    const uint32_t prev = it->second;
+    if (data.strengths(static_cast<int>(i)) > data.strengths(static_cast<int>(prev)))
+    {
+      it->second = i;
+    }
+  }
+
+  std::vector<uint32_t> selected_idx;
+  selected_idx.reserve(best_by_handle.size());
+  for (const auto& kv : best_by_handle)
+  {
+    selected_idx.push_back(kv.second);
+  }
+  std::sort(selected_idx.begin(), selected_idx.end());
+
+  if (selected_idx.size() != packet_count)
+  {
+    LOG(WARNING) << "[ELIS] Dropped " << (packet_count - selected_idx.size())
+                 << " duplicate-handle keypoints (kept strongest per handle).";
+  }
+
+  const std::size_t count = selected_idx.size();
   frame.ensureFeatureCapacity(static_cast<uint32_t>(count));
   frame.descriptors_.resize(static_cast<int>(data.descriptors.rows()),
                             static_cast<int>(count));
@@ -284,8 +335,9 @@ bool populate_frame_from_elis(const EventArray& events,
   std::vector<uint32_t> seed_idx;
   nonseed_idx.reserve(count);
   seed_idx.reserve(count);
-  for (uint32_t i = 0; i < static_cast<uint32_t>(count); ++i)
+  for (uint32_t j = 0; j < static_cast<uint32_t>(count); ++j)
   {
+    const uint32_t i = selected_idx[j];
     const int32_t track_id = packet.track_ids[i];
     const LandmarkHandle h = state.track_to_handle.at(track_id);
     const bool needs_seed_obs = landmarks.obs(h).empty();

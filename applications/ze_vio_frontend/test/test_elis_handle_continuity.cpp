@@ -23,6 +23,9 @@ TEST(ElisLinkHandles, AllocatesAndKeepsStableHandles)
   EXPECT_TRUE(ze::isValidLandmarkHandle(h1));
   EXPECT_TRUE(ze::isValidLandmarkHandle(h2));
   EXPECT_TRUE(ze::isValidLandmarkHandle(h3));
+  EXPECT_NE(h1, h2);
+  EXPECT_NE(h1, h3);
+  EXPECT_NE(h2, h3);
 
   const ze::ElisLinkHandleStats s1 =
       ze::ensureElisLandmarkHandles(track_ids, landmarks, track_to_handle, 1u, seed);
@@ -72,6 +75,7 @@ TEST(ElisLinkHandles, DeduplicatesTrackIds)
   ASSERT_EQ(track_to_handle.size(), 2u);
   EXPECT_TRUE(ze::isValidLandmarkHandle(track_to_handle.at(7)));
   EXPECT_TRUE(ze::isValidLandmarkHandle(track_to_handle.at(8)));
+  EXPECT_NE(track_to_handle.at(7), track_to_handle.at(8));
 }
 
 TEST(ElisLinkHandles, AllocatesWhenSlotIsOutOfRange)
