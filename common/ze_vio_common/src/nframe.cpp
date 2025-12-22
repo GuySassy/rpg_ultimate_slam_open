@@ -40,7 +40,7 @@ std::ostream& operator<<(std::ostream& out, const NFrame& nframe)
   out << "NFrame:\n"
       << "  seq = " << nframe.seq() << "\n"
       << "  handle = " << nframe.handle().handle
-      << " (slot = " << nframe.handle().slot << ", " << nframe.handle().version << ")\n"
+      << " (slot = " << nframe.handle().slot() << ", " << nframe.handle().version() << ")\n"
       << "  timestamp  = " << nframe.timestamp() << "\n";
   for (size_t i = 0u; i < nframe.size(); ++i)
   {

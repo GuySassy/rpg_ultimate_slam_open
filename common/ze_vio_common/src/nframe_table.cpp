@@ -70,14 +70,14 @@ NFrameHandle NFrameTable::getNewHandle()
 
     auto goodSlotLambda = [&]() -> bool
     {
-      if (   end_ == nframe_h_k_.slot
-          || end_ == nframe_h_km1_.slot)
+      if (   end_ == nframe_h_k_.slot()
+          || end_ == nframe_h_km1_.slot())
       {
         return false;
       }
       for (const NFrameHandle h : last_keyframes_)
       {
-        if (h.slot == end_)
+        if (h.slot() == end_)
         {
           return false;
         }

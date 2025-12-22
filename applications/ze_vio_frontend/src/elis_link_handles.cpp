@@ -1,0 +1,164 @@
+// This code is released only for internal evaluation.
+// No commercial use, editing or copying is allowed.
+
+#include <ze/vio_frontend/elis_link_handles.hpp>
+
+#include <unordered_set>
+
+#include <ze/common/logging.hpp>
+#include <ze/vio_common/landmark_types.hpp>
+
+namespace ze {
+
+namespace {
+
+inline bool canHealFromSlot(const LandmarkHandle h)
+{
+  return h.slot() < LandmarkTable::c_capacity_;
+}
+
+inline void ensure_slot_version_valid(LandmarkTable& landmarks, const uint32_t slot)
+{
+  auto& versions = landmarks.versions();
+  auto& v = versions[slot];
+  if (v < c_landmark_version_min_valid)
+  {
+    v = c_landmark_version_min_valid;
+  }
+}
+
+}  // namespace
+
+ElisLinkHandleStats ensureElisLandmarkHandles(
+    const std::vector<int32_t>& track_ids,
+    LandmarkTable& landmarks,
+    std::unordered_map<int32_t, LandmarkHandle>& track_to_handle,
+    const uint32_t nframe_seq,
+    const Seed& seed_prototype)
+{
+  ElisLinkHandleStats stats;
+
+  std::vector<int32_t> unique_track_ids;
+  unique_track_ids.reserve(track_ids.size());
+  std::unordered_set<int32_t> seen;
+  seen.reserve(track_ids.size());
+  for (const int32_t track_id : track_ids)
+  {
+    if (seen.insert(track_id).second)
+    {
+      unique_track_ids.push_back(track_id);
+    }
+  }
+  stats.unique_track_ids = unique_track_ids.size();
+
+  std::vector<int32_t> missing_track_ids;
+  missing_track_ids.reserve(unique_track_ids.size());
+
+  for (const int32_t track_id : unique_track_ids)
+  {
+    auto it = track_to_handle.find(track_id);
+    if (it == track_to_handle.end())
+    {
+      missing_track_ids.push_back(track_id);
+      ++stats.missing_new;
+      continue;
+    }
+
+    LandmarkHandle& h = it->second;
+    if (h.slot() >= LandmarkTable::c_capacity_)
+    {
+      missing_track_ids.push_back(track_id);
+      ++stats.missing_invalid_handle;
+      continue;
+    }
+    if (!isValidLandmarkHandle(h))
+    {
+      if (canHealFromSlot(h))
+      {
+        const uint32_t slot = h.slot();
+        ensure_slot_version_valid(landmarks, slot);
+        const LandmarkHandle candidate(slot, landmarks.versions()[slot]);
+        if (isValidLandmarkHandle(candidate) && landmarks.isStored(candidate, true) &&
+            !isLandmarkInactive(landmarks.typeAtSlot(slot)))
+        {
+          h = candidate;
+          ++stats.healed_invalid_handle;
+          continue;
+        }
+      }
+
+      missing_track_ids.push_back(track_id);
+      ++stats.missing_invalid_handle;
+      continue;
+    }
+
+    if (isLandmarkInactive(landmarks.type(h)))
+    {
+      missing_track_ids.push_back(track_id);
+      ++stats.missing_inactive;
+      continue;
+    }
+
+    if (!landmarks.isStored(h, true))
+    {
+      // A valid handle with a mismatching version is unsafe to keep using: it
+      // may alias a different landmark at the same slot. Reallocate.
+      missing_track_ids.push_back(track_id);
+      ++stats.missing_not_stored;
+      continue;
+    }
+  }
+
+  if (missing_track_ids.empty())
+  {
+    return stats;
+  }
+
+  const LandmarkHandles new_handles =
+      landmarks.getNewLandmarkHandles(static_cast<uint32_t>(missing_track_ids.size()), nframe_seq);
+  // Be explicit: we requested one handle per missing track id.
+  stats.allocated_handles = missing_track_ids.size();
+
+  for (size_t i = 0; i < missing_track_ids.size(); ++i)
+  {
+    const int32_t track_id = missing_track_ids[i];
+    LandmarkHandle h = new_handles[i];
+
+    // Defensive: make sure the table's version is never below the minimum valid
+    // value. If a slot's version becomes 0/1 (e.g. due to a stale build or
+    // legacy handle packing), downstream validity checks and handle reuse will
+    // fail and cause perpetual reallocations.
+    if (canHealFromSlot(h))
+    {
+      const uint32_t slot = h.slot();
+      ensure_slot_version_valid(landmarks, slot);
+      h = LandmarkHandle(slot, landmarks.versions()[slot]);
+      if (isLandmarkInactive(landmarks.typeAtSlot(slot)))
+      {
+        landmarks.typeAtSlot(slot) = LandmarkType::Seed;
+      }
+    }
+
+    // Defensive: if the returned handle is not valid/stored (e.g. due to a bad
+    // version), try to reconstruct the slot's current handle from the table.
+    if (!isValidLandmarkHandle(h) || !landmarks.isStored(h, true))
+    {
+      if (canHealFromSlot(h))
+      {
+        const LandmarkHandle candidate = landmarks.getHandleAtSlot(h.slot());
+        if (isValidLandmarkHandle(candidate) && landmarks.isStored(candidate, true) &&
+            !isLandmarkInactive(landmarks.type(candidate)))
+        {
+          h = candidate;
+        }
+      }
+    }
+
+    track_to_handle[track_id] = h;
+    landmarks.seed(h) = seed_prototype;
+  }
+
+  return stats;
+}
+
+}  // namespace ze

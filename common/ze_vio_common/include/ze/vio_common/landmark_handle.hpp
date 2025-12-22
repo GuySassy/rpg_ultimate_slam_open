@@ -17,32 +17,32 @@ constexpr uint8_t c_landmark_version_min_valid = 2u;
 
 inline bool isValidLandmarkHandle(LandmarkHandle h)
 {
-  return h.version >= c_landmark_version_min_valid;
+  return h.version() >= c_landmark_version_min_valid;
 }
 
 inline bool isValidLandmarkHandleType(LandmarkHandle::value_t v)
 {
-  return LandmarkHandle(v).version >= c_landmark_version_min_valid;
+  return LandmarkHandle(v).version() >= c_landmark_version_min_valid;
 }
 
 inline bool isDeletedLandmarkHandle(LandmarkHandle h)
 {
-  return h.version == c_landmark_version_deleted;
+  return h.version() == c_landmark_version_deleted;
 }
 
 inline bool isOutlierLandmarkHandle(LandmarkHandle h)
 {
-  return h.version == c_landmark_version_invalid;
+  return h.version() == c_landmark_version_invalid;
 }
 
 inline void markLandmarkHandleAsInvalid(LandmarkHandle& h)
 {
-  h.version = c_landmark_version_deleted;
+  h.setVersion(c_landmark_version_deleted);
 }
 
 inline void markLandmarkHandleAsOutlier(LandmarkHandle& h)
 {
-  h.version = c_landmark_version_invalid;
+  h.setVersion(c_landmark_version_invalid);
 }
 
 } // namespace ze

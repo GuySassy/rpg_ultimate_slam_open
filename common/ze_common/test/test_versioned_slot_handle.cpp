@@ -35,13 +35,13 @@ TEST(VersionedSlotHandle, test)
   VIdx v1;
   EXPECT_EQ(sizeof(VIdx), 4);
 
-  v1.slot = 1;
-  v1.version = 1;
+  v1.setSlot(1);
+  v1.setVersion(1);
   VLOG(1) << std::bitset<32>(v1.handle);
   EXPECT_EQ(v1.handle, 1 + (1<<8));
 
-  v1.slot = VIdx::maxSlot();
-  v1.version = VIdx::maxVersion();
+  v1.setSlot(VIdx::maxSlot());
+  v1.setVersion(VIdx::maxVersion());
   VLOG(1) << std::bitset<32>(v1.handle);
   EXPECT_EQ(v1.handle, std::numeric_limits<uint32_t>::max());
 
@@ -52,8 +52,8 @@ TEST(VersionedSlotHandle, test)
   EXPECT_EQ(v3.handle, 10);
 
   VIdx v4(10, 2);
-  EXPECT_EQ(v4.slot, 10);
-  EXPECT_EQ(v4.version, 2);
+  EXPECT_EQ(v4.slot(), 10);
+  EXPECT_EQ(v4.version(), 2);
 }
 
 ZE_UNITTEST_ENTRYPOINT

@@ -28,6 +28,7 @@
 #include <ze/vio_common/nframe.hpp>
 #include <ze/vio_common/vio_visualizer.hpp>
 #include <ze/vio_frontend/frontend_gflags.hpp>
+#include <ze/vio_frontend/elis_link_handles.hpp>
 #include <ze/vio_frontend/feature_tracker.hpp>
 #include <ze/vio_frontend/feature_initializer.hpp>
 #include <ze/vio_frontend/stereo_matcher.hpp>
@@ -236,43 +237,13 @@ bool populate_frame_from_elis(const EventArray& events,
   seed_prototype << real_t{1} / frame.median_depth_,
                     frame.seeds_mean_range_, 10, 10;
 
-  // Allocate (or re-allocate) landmark handles for unseen/invalid tracks.
-  std::vector<int32_t> missing_track_ids;
-  missing_track_ids.reserve(packet.track_ids.size());
-  std::size_t missing_new = 0u;
-  std::size_t missing_invalid_handle = 0u;
-  std::size_t missing_inactive = 0u;
-  std::size_t missing_not_stored = 0u;
-  for (const int32_t track_id : packet.track_ids)
-  {
-    auto it = state.track_to_handle.find(track_id);
-    if (it == state.track_to_handle.end())
-    {
-      missing_track_ids.push_back(track_id);
-      ++missing_new;
-      continue;
-    }
-    const LandmarkHandle h = it->second;
-    if (!isValidLandmarkHandle(h))
-    {
-      missing_track_ids.push_back(track_id);
-      ++missing_invalid_handle;
-      continue;
-    }
-    if (isLandmarkInactive(landmarks.type(h)))
-    {
-      missing_track_ids.push_back(track_id);
-      ++missing_inactive;
-      continue;
-    }
-    if (!landmarks.isStored(h, true))
-    {
-      // This should not happen during normal operation because handles are
-      // allocated from LandmarkTable. Keep the mapping stable for tracking, but
-      // surface the issue via diagnostics.
-      ++missing_not_stored;
-    }
-  }
+  // Resolve/allocate stable landmark handles for each track id.
+  const ElisLinkHandleStats handle_stats =
+      ensureElisLandmarkHandles(packet.track_ids,
+                                landmarks,
+                                state.track_to_handle,
+                                nframe_seq,
+                                seed_prototype);
 
   if (diag_enabled)
   {
@@ -285,31 +256,18 @@ bool populate_frame_from_elis(const EventArray& events,
               << " prev_unique=" << prev_unique_ids
               << " overlap=" << diag_overlap_prev
               << " new=" << new_ids << ")"
-              << " handles_reallocated=" << missing_track_ids.size()
-              << " missing(new=" << missing_new
-              << " invalid_handle=" << missing_invalid_handle
-              << " inactive=" << missing_inactive
-              << " not_stored=" << missing_not_stored << ")"
+              << " handles_allocated=" << handle_stats.allocated_handles
+              << " missing(new=" << handle_stats.missing_new
+              << " invalid_handle=" << handle_stats.missing_invalid_handle
+              << " inactive=" << handle_stats.missing_inactive
+              << " not_stored=" << handle_stats.missing_not_stored
+              << " healed_invalid=" << handle_stats.healed_invalid_handle << ")"
               << " slice_span_us=" << diag_slice_span_us
               << " median_disp_px=" << diag_median_disp_px
               << " max_disp_px=" << diag_max_disp_px
               << " elis_proc_ms=" << packet.processing_time_ms
               << " elis_mode=" << packet.detection_mode;
     state.prev_track_px.swap(diag_curr_track_px);
-  }
-
-  if (!missing_track_ids.empty())
-  {
-    const LandmarkHandles new_handles =
-        landmarks.getNewLandmarkHandles(static_cast<uint32_t>(missing_track_ids.size()),
-                                        nframe_seq);
-    for (size_t i = 0; i < missing_track_ids.size(); ++i)
-    {
-      const int32_t track_id = missing_track_ids[i];
-      const LandmarkHandle h = new_handles[i];
-      state.track_to_handle[track_id] = h;
-      landmarks.seed(h) = seed_prototype;
-    }
   }
 
   // Build FrameFeatureData (pads descriptors to 64 bytes by default).

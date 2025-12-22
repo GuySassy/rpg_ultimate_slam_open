@@ -16,7 +16,7 @@ constexpr uint8_t c_nframe_version_min_valid = 1u;
 
 inline bool isValidNFrameHandle(NFrameHandle h)
 {
-  return h.version >= c_nframe_version_min_valid;
+  return h.version() >= c_nframe_version_min_valid;
 }
 
 } // namespace ze

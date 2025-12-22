@@ -31,6 +31,7 @@ endif()
 # LIBRARIES #
 #############
 set(HEADERS
+  include/ze/vio_frontend/elis_link_handles.hpp
   include/ze/vio_frontend/feature_initializer.hpp
   include/ze/vio_frontend/feature_tracker.hpp
   include/ze/vio_frontend/frontend_api.hpp
@@ -45,6 +46,7 @@ set(HEADERS
   )
 
 set(SOURCES
+  src/elis_link_handles.cpp
   src/feature_initializer.cpp
   src/feature_tracker.cpp
   src/frontend_api.cpp
@@ -147,6 +149,22 @@ if(ELIS_LINK_CORE_LIB)
     endif()
     target_compile_definitions(test_elis_link_enabled PRIVATE ELIS_LINK_ENABLED)
     add_test(NAME elis_link_frontend_flag_test COMMAND test_elis_link_enabled)
+
+    add_executable(test_elis_handle_continuity test/test_elis_handle_continuity.cpp)
+    target_link_libraries(test_elis_handle_continuity
+      ${PROJECT_NAME}
+      ${ELIS_LINK_CORE_LIB}
+      ${catkin_LIBRARIES}
+      GTest::GTest
+      GTest::Main)
+    if(pybind11_FOUND)
+      target_link_libraries(test_elis_handle_continuity pybind11::embed)
+    endif()
+    if(Python3_Development_FOUND)
+      target_link_libraries(test_elis_handle_continuity Python3::Python)
+    endif()
+    target_compile_definitions(test_elis_handle_continuity PRIVATE ELIS_LINK_ENABLED)
+    add_test(NAME elis_link_handle_continuity_test COMMAND test_elis_handle_continuity)
   else()
     message(STATUS "GTest not found; skipping test_elis_link_enabled")
   endif()

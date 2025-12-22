@@ -131,7 +131,7 @@ uint32_t addLandmarkObservations(const NFrame& nframe, LandmarkTable& landmarks)
         if (!landmarks.isStored(lm_h, true))
         {
           LOG(ERROR) << "Trying to add observation to Landmark that is not stored "
-                     << "at slot " << lm_h.slot;
+                     << "at slot " << lm_h.slot();
           continue;
         }
         DEBUG_CHECK_LT(frame.level_vec_(i), 10);  // make sure it's initialized.

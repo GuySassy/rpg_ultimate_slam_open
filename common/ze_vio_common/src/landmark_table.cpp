@@ -5,6 +5,8 @@
 
 namespace ze {
 
+constexpr uint32_t LandmarkTable::c_capacity_;
+
 LandmarkTable::LandmarkTable()
 {
   num_landmarks_ = 0u;
@@ -27,6 +29,10 @@ LandmarkHandles LandmarkTable::getNewLandmarkHandles(uint32_t num, uint32_t iter
       // Increase the version number of the slot:
       version_t& v = versions_[i];
       v = (v == LandmarkHandle::maxVersion()) ? c_landmark_version_min_valid : v + 1u;
+      if (v < c_landmark_version_min_valid)
+      {
+        v = c_landmark_version_min_valid;
+      }
 
       // Return a handle that is composed of the slot and the version:
       LandmarkHandle handle(i, v);
@@ -51,31 +57,31 @@ LandmarkHandles LandmarkTable::getNewLandmarkHandles(uint32_t num, uint32_t iter
   // Set types:
   for (const LandmarkHandle h : handles)
   {
-    types_[h.slot] = LandmarkType::Seed;
+    types_[h.slot()] = LandmarkType::Seed;
   }
 
   // Reset info:
   for (const LandmarkHandle h : handles)
   {
-    infos_[h.slot] = LandmarkInfo();
+    infos_[h.slot()] = LandmarkInfo();
   }
 
   // Reset observations:
   for (const LandmarkHandle h : handles)
   {
-    obs_[h.slot].clear();
+    obs_[h.slot()].clear();
   }
 
   // Reset iter count:
   for (const LandmarkHandle h : handles)
   {
-    last_iter_visible_[h.slot] = iter_count;
+    last_iter_visible_[h.slot()] = iter_count;
   }
 
   // Reset track:
   for (const LandmarkHandle h : handles)
   {
-    tracks_[h.slot].clear();
+    tracks_[h.slot()].clear();
   }
 
 
@@ -174,7 +180,7 @@ void LandmarkTable::setLastIterVisible(const LandmarkHandles handles, uint32_t i
   {
     if (isValidLandmarkHandle(lm_h))
     {
-      last_iter_visible_[lm_h.slot] = iter;
+      last_iter_visible_[lm_h.slot()] = iter;
     }
   }
 }

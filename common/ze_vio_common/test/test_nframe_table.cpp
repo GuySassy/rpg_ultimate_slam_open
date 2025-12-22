@@ -19,42 +19,42 @@ TEST(NFrameStorageTests, testFunctionality)
   EXPECT_FALSE(isValidNFrameHandle(storage.nframeHandleKm1()));
 
   NFrameHandle handle1 = storage.makeAndStoreNewEmptyTestNFrame()->handle();
-  EXPECT_EQ(handle1.version, 1);
-  EXPECT_EQ(handle1.slot, 0);
+  EXPECT_EQ(handle1.version(), 1);
+  EXPECT_EQ(handle1.slot(), 0);
   EXPECT_EQ(storage.nframeHandleK(), handle1);
 
   NFrameHandle handle2 = storage.makeAndStoreNewEmptyTestNFrame()->handle();
-  EXPECT_EQ(handle2.version, 1);
-  EXPECT_EQ(handle2.slot, 1);
+  EXPECT_EQ(handle2.version(), 1);
+  EXPECT_EQ(handle2.slot(), 1);
   storage.setKeyframe(handle2);
   EXPECT_EQ(storage.nframeHandleK(), handle2);
   EXPECT_EQ(storage.nframeHandleKm1(), handle1);
 
   // Re-use slot & handle at km1
   NFrameHandle handle3 = storage.makeAndStoreNewEmptyTestNFrame()->handle();
-  EXPECT_EQ(handle3.version, 1);
-  EXPECT_EQ(handle3.slot, 0);
+  EXPECT_EQ(handle3.version(), 1);
+  EXPECT_EQ(handle3.slot(), 0);
   EXPECT_EQ(storage.nframeHandleK(), handle3);
   EXPECT_EQ(storage.nframeHandleKm1(), handle2);
 
   // New slot, because handle2 is keyframe.
   NFrameHandle handle4 = storage.makeAndStoreNewEmptyTestNFrame()->handle();
-  EXPECT_EQ(handle4.version, 1);
-  EXPECT_EQ(handle4.slot, 2);
+  EXPECT_EQ(handle4.version(), 1);
+  EXPECT_EQ(handle4.slot(), 2);
   EXPECT_EQ(storage.nframeHandleK(), handle4);
   EXPECT_EQ(storage.nframeHandleKm1(), handle3);
 
   // Re-use slot at handle at km1
   NFrameHandle handle5 = storage.makeAndStoreNewEmptyTestNFrame()->handle();
-  EXPECT_EQ(handle5.version, 1);
-  EXPECT_EQ(handle5.slot, 0);
+  EXPECT_EQ(handle5.version(), 1);
+  EXPECT_EQ(handle5.slot(), 0);
   EXPECT_EQ(storage.nframeHandleK(), handle5);
   EXPECT_EQ(storage.nframeHandleKm1(), handle4);
 
   // Re-use slot & handle at km2
   NFrameHandle handle6 = storage.makeAndStoreNewEmptyTestNFrame()->handle();
-  EXPECT_EQ(handle6.version, 1);
-  EXPECT_EQ(handle6.slot, 2);
+  EXPECT_EQ(handle6.version(), 1);
+  EXPECT_EQ(handle6.slot(), 2);
   EXPECT_EQ(storage.nframeHandleK(), handle6);
   EXPECT_EQ(storage.nframeHandleKm1(), handle5);
 }
@@ -174,4 +174,3 @@ TEST(NFrameStorageTests, benchmark)
 
 
 ZE_UNITTEST_ENTRYPOINT
-

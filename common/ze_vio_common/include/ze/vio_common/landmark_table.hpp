@@ -31,8 +31,9 @@ public:
     {
       return false;
     }
-    CHECK_LT(handle.slot, c_capacity_);
-    if (handle.version == versions_[handle.slot])
+    const auto slot = handle.slot();
+    CHECK_LT(slot, c_capacity_);
+    if (handle.version() == versions_[slot])
     {
       return true;
     }
@@ -49,12 +50,12 @@ public:
   // Access Landmark Type:
   inline const LandmarkType& type(const LandmarkHandle handle) const
   {
-    return types_[handle.slot];
+    return types_[handle.slot()];
   }
 
   inline LandmarkType& type(const LandmarkHandle handle)
   {
-    return types_[handle.slot];
+    return types_[handle.slot()];
   }
 
   inline const LandmarkType& typeAtSlot(const uint32_t slot) const
@@ -83,12 +84,12 @@ public:
   // Access Landmark Position:
   inline const Eigen::Ref<const Position> p_W(const LandmarkHandle handle) const
   {
-    return p_W_.col(handle.slot);
+    return p_W_.col(handle.slot());
   }
 
   inline Eigen::Ref<Position> p_W(const LandmarkHandle handle)
   {
-    return p_W_.col(handle.slot);
+    return p_W_.col(handle.slot());
   }
 
   inline const Eigen::Ref<const Position> p_W_atSlot(const uint32_t slot) const
@@ -115,12 +116,12 @@ public:
   // Access Landmark Seeds:
   inline const Eigen::Ref<const Seed> seed(const LandmarkHandle handle) const
   {
-    return seeds_.col(handle.slot);
+    return seeds_.col(handle.slot());
   }
 
   inline Eigen::Ref<Seed> seed(const LandmarkHandle handle)
   {
-    return seeds_.col(handle.slot);
+    return seeds_.col(handle.slot());
   }
 
   inline const Eigen::Ref<const Seed> seedAtSlot(const uint32_t slot) const
@@ -147,12 +148,12 @@ public:
   // Access Landmark Info:
   inline const LandmarkInfo& info(const LandmarkHandle handle) const
   {
-    return infos_[handle.slot];
+    return infos_[handle.slot()];
   }
 
   inline LandmarkInfo& info(const LandmarkHandle handle)
   {
-    return infos_[handle.slot];
+    return infos_[handle.slot()];
   }
 
   inline const LandmarkInfo& infoAtSlot(const uint32_t slot) const
@@ -182,12 +183,12 @@ public:
 
   inline const LandmarkObsVec& obs(const LandmarkHandle handle) const
   {
-    return obs_[handle.slot];
+    return obs_[handle.slot()];
   }
 
   inline LandmarkObsVec& obs(const LandmarkHandle handle)
   {
-    return obs_[handle.slot];
+    return obs_[handle.slot()];
   }
 
   inline const LandmarkObsVec& obsAtSlot(const uint32_t slot) const
@@ -280,12 +281,12 @@ public:
   // At which iteration was the landmark last seen.
   inline uint32_t lastIterVisible(const LandmarkHandle handle) const
   {
-    return last_iter_visible_[handle.slot];
+    return last_iter_visible_[handle.slot()];
   }
 
   inline uint32_t& lastIterVisible(const LandmarkHandle handle)
   {
-    return last_iter_visible_[handle.slot];
+    return last_iter_visible_[handle.slot()];
   }
 
   inline uint32_t lastIterVisibleAtSlot(const uint32_t slot) const
@@ -325,7 +326,7 @@ public:
 
   inline int projectionQuality(const LandmarkHandle h) const
   {
-    return projectionQualityAtSlot(h.slot);
+    return projectionQualityAtSlot(h.slot());
   }
 
   inline void incrementSuccessfulProjectionsAtSlot(const uint32_t slot)
@@ -339,7 +340,7 @@ public:
 
   inline void incrementSuccessfulProjections(const LandmarkHandle h)
   {
-    incrementSuccessfulProjectionsAtSlot(h.slot);
+    incrementSuccessfulProjectionsAtSlot(h.slot());
   }
 
   inline void incrementFailedProjectionsAtSlot(const uint32_t slot, const uint8_t num = 1u)
@@ -353,7 +354,7 @@ public:
 
   inline void incrementFailedProjections(const LandmarkHandle h, const uint8_t num = 1u)
   {
-    incrementFailedProjectionsAtSlot(h.slot, num);
+    incrementFailedProjectionsAtSlot(h.slot(), num);
   }
 
   inline bool isTriangulated(const LandmarkHandle h) const
@@ -368,7 +369,7 @@ public:
 
   inline bool isActive(const LandmarkHandle h) const
   {
-    return isLandmarkActive(types_[h.slot]);
+    return isLandmarkActive(types_[h.slot()]);
   }
 
   inline void setAsLocalizationLandmark(const LandmarkHandle h)
@@ -385,14 +386,18 @@ public:
   // Reset:
   inline void resetLandmark(const LandmarkHandle h)
   {
-    resetLandmarkAtSlot(h.slot);
+    resetLandmarkAtSlot(h.slot());
   }
 
   inline void resetLandmarkAtSlot(const uint32_t slot)
   {
     types_[slot] = LandmarkType::Unknown;
     version_t& v = versions_[slot];
-    v = (v == LandmarkHandle::maxVersion()) ? 2u : v + 1u;
+    v = (v == LandmarkHandle::maxVersion()) ? c_landmark_version_min_valid : v + 1u;
+    if (v < c_landmark_version_min_valid)
+    {
+      v = c_landmark_version_min_valid;
+    }
   }
 
   void cleanupInactiveLandmarks();
@@ -402,7 +407,7 @@ public:
 
   inline KeypointsVec& track(const LandmarkHandle handle)
   {
-    return tracks_[handle.slot];
+    return tracks_[handle.slot()];
   }
 
   inline const std::array<KeypointsVec, c_capacity_>& tracks() const

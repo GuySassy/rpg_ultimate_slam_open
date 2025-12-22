@@ -35,8 +35,9 @@ public:
   inline bool isStored(const NFrameHandle handle) const
   {
     DEBUG_CHECK(isValidNFrameHandle(handle)) << "Handle is not valid " << handle;
-    DEBUG_CHECK_LT(handle.slot, c_capacity_);
-    return (handle.version == versions_[handle.slot]);
+    const auto slot = handle.slot();
+    DEBUG_CHECK_LT(slot, c_capacity_);
+    return (handle.version() == versions_[slot]);
   }
 
   //----------------------------------------------------------------------------
@@ -56,52 +57,52 @@ public:
   inline const Transformation& T_B_W(const NFrameHandle handle) const
   {
     DEBUG_CHECK(isStored(handle)) << "Not stored: " << handle;
-    return T_B_W_[handle.slot];
+    return T_B_W_[handle.slot()];
   }
 
   inline Transformation& T_B_W(const NFrameHandle handle)
   {
     DEBUG_CHECK(isStored(handle)) << "Not stored: " << handle;
-    return T_B_W_[handle.slot];
+    return T_B_W_[handle.slot()];
   }
 
   //! Get pose of current frame.
   inline const Transformation& T_Bk_W() const
   {
     DEBUG_CHECK(isStored(nframe_h_k_)) << "Not stored: " << nframe_h_k_;
-    return T_B_W_[nframe_h_k_.slot];
+    return T_B_W_[nframe_h_k_.slot()];
   }
 
   inline Transformation& T_Bk_W()
   {
     DEBUG_CHECK(isStored(nframe_h_k_)) << "Not stored: " << nframe_h_k_;
-    return T_B_W_[nframe_h_k_.slot];
+    return T_B_W_[nframe_h_k_.slot()];
   }
 
   //! Get pose of last frame.
   inline const Transformation& T_Bkm1_W() const
   {
     DEBUG_CHECK(isStored(nframe_h_km1_)) << "Not stored: " << nframe_h_km1_;
-    return T_B_W_[nframe_h_km1_.slot];
+    return T_B_W_[nframe_h_km1_.slot()];
   }
 
   inline Transformation& T_Bkm1_W()
   {
     DEBUG_CHECK(isStored(nframe_h_km1_)) << "Not stored: " << nframe_h_km1_;
-    return T_B_W_[nframe_h_km1_.slot];
+    return T_B_W_[nframe_h_km1_.slot()];
   }
 
   //! Get pose of last key-frame (lkf)
   inline const Transformation& T_Blkf_W() const
   {
     DEBUG_CHECK(isStored(nframe_h_lkf_)) << "Not stored: " << nframe_h_lkf_;
-    return T_B_W_[nframe_h_lkf_.slot];
+    return T_B_W_[nframe_h_lkf_.slot()];
   }
 
   inline Transformation& T_Blkf_W()
   {
     DEBUG_CHECK(isStored(nframe_h_lkf_)) << "Not stored: " << nframe_h_lkf_;
-    return T_B_W_[nframe_h_lkf_.slot];
+    return T_B_W_[nframe_h_lkf_.slot()];
   }
 
   inline const std::array<Transformation, c_capacity_>& T_B_W_data() const
@@ -117,13 +118,13 @@ public:
   inline const Vector3& v_W(const NFrameHandle handle) const
   {
     DEBUG_CHECK(isStored(handle)) << "Not stored: " << handle;
-    return v_W_[handle.slot];
+    return v_W_[handle.slot()];
   }
 
   inline Vector3& v_W(const NFrameHandle handle)
   {
     DEBUG_CHECK(isStored(handle)) << "Not stored: " << handle;
-    return v_W_[handle.slot];
+    return v_W_[handle.slot()];
   }
 
   //----------------------------------------------------------------------------
@@ -156,7 +157,7 @@ public:
     {
       LOG(WARNING) << "Accessing nframe that is not valid.";
     }
-    return nframes_[handle.slot];
+    return nframes_[handle.slot()];
   }
 
   inline NFrame::Ptr& nframe(const NFrameHandle handle)
@@ -165,7 +166,7 @@ public:
     {
       LOG(WARNING) << "Accessing nframe that is not valid.";
     }
-    return nframes_[handle.slot];
+    return nframes_[handle.slot()];
   }
 
   //----------------------------------------------------------------------------

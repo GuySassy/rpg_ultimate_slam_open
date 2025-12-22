@@ -434,7 +434,7 @@ void VioVisualizer::displayFrameImageWithStatistics(
       continue;
     }
     cv::Scalar color = FLAGS_vio_viz_feature_tracks_colormap != -1 ?
-                       colors_[lm_h.slot] : cv::Scalar(0, 255, 0);
+                       colors_[lm_h.slot()] : cv::Scalar(0, 255, 0);
 
 
     if (FLAGS_vio_viz_feature_tracks

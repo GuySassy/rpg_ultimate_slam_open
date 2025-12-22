@@ -36,26 +36,35 @@ namespace ze {
 //! http://seanmiddleditch.com/data-structures-for-game-developers-the-slot-map/
 //! http://blog.molecular-matters.com/2013/05/17/adventures-in-data-oriented-design-part-3b-internal-references/
 template <typename T, int NumSlotBits, int NumVersionBits>
-union VersionedSlotHandle
+struct VersionedSlotHandle
 {
   using value_t = T;
 
-  struct
+  static constexpr T maxSlot() { return (T{1} << NumSlotBits) - 1; }
+  static constexpr T maxVersion() { return (T{1} << NumVersionBits) - 1; }
+
+  // Canonical storage. Slot/version are derived via bit operations.
+  T handle{0};
+
+  VersionedSlotHandle() = default;
+  explicit VersionedSlotHandle(T h) : handle(h) {}
+  VersionedSlotHandle(T slot, T version)
+    : handle(static_cast<T>((slot & maxSlot()) | ((version & maxVersion()) << NumSlotBits)))
+  {}
+
+  inline T slot() const { return static_cast<T>(handle & maxSlot()); }
+  inline T version() const { return static_cast<T>((handle >> NumSlotBits) & maxVersion()); }
+
+  inline void setSlot(const T slot)
   {
-    // The first NumSlotBits in this bit-field store the slot, the next
-    // NumVersionBits store the version number of the handle.
-    T slot    : NumSlotBits;
-    T version : NumVersionBits;
-  };
-  T handle;
+    handle = static_cast<T>((handle & ~maxSlot()) | (slot & maxSlot()));
+  }
 
-  // Always initialize handle first to zero to make sure that all bits are really 0.
-  VersionedSlotHandle() : handle(0) {}
-  VersionedSlotHandle(T handle) : handle(handle) {}
-  VersionedSlotHandle(T _slot, T _version) : handle(0) { slot = _slot; version = _version; }
-
-  static constexpr T maxSlot() { return (1 << NumSlotBits) - 1; }
-  static constexpr T maxVersion() { return (1 << NumVersionBits) - 1; }
+  inline void setVersion(const T version)
+  {
+    const T version_mask = static_cast<T>(maxVersion() << NumSlotBits);
+    handle = static_cast<T>((handle & ~version_mask) | ((version & maxVersion()) << NumSlotBits));
+  }
 
   void reset() { handle = T{0}; }
 };
@@ -79,7 +88,7 @@ inline std::ostream& operator<<(
     std::ostream& out, const VersionedSlotHandle<T, NumSlotBits, NumVersionBits> handle)
 {
   out << handle.handle
-      << " (slot: " << handle.slot << ", version: " << handle.version << ")";
+      << " (slot: " << handle.slot() << ", version: " << handle.version() << ")";
   return out;
 }
 
