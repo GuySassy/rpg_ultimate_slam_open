@@ -223,6 +223,21 @@ if(ELIS_LINK_CORE_LIB)
     endif()
     target_compile_definitions(elis_link_playback PRIVATE HAVE_METAVISION_SDK)
   endif()
+
+  # Live camera runner (hardware). Requires USB passthrough + Metavision SDK at runtime.
+  add_executable(elis_link_live src/elis_link_live.cpp)
+  target_link_libraries(elis_link_live
+    ${PROJECT_NAME}
+    ${ELIS_LINK_CORE_LIB}
+    ${catkin_LIBRARIES})
+  target_compile_definitions(elis_link_live PRIVATE ELIS_LINK_ENABLED)
+  if(HAVE_METAVISION_SDK)
+    target_link_libraries(elis_link_live ${MV_ALL_LIBS})
+    if(MV_ALL_INCLUDES)
+      target_include_directories(elis_link_live PRIVATE ${MV_ALL_INCLUDES})
+    endif()
+    target_compile_definitions(elis_link_live PRIVATE HAVE_METAVISION_SDK)
+  endif()
 endif()
 
 ##########
