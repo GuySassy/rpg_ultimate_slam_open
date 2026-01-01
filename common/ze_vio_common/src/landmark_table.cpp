@@ -3,7 +3,37 @@
 
 #include <ze/vio_common/landmark_table.hpp>
 
+#include <algorithm>
+#include <cstdio>
+#include <sstream>
+#include <string>
+
 namespace ze {
+
+namespace {
+
+std::string format_handle_sample(const LandmarkHandles& handles, const size_t max_count)
+{
+  std::ostringstream oss;
+  const size_t count = std::min(handles.size(), max_count);
+  for (size_t i = 0; i < count; ++i)
+  {
+    if (i > 0)
+    {
+      oss << ',';
+    }
+    const LandmarkHandle& h = handles[i];
+    oss << h.slot() << ":" << static_cast<int>(h.version())
+        << "(" << static_cast<uint32_t>(h.handle) << ")";
+  }
+  if (handles.size() > count)
+  {
+    oss << "...";
+  }
+  return oss.str();
+}
+
+}  // namespace
 
 constexpr uint32_t LandmarkTable::c_capacity_;
 
@@ -20,6 +50,18 @@ LandmarkTable::LandmarkTable()
 // -----------------------------------------------------------------------------
 LandmarkHandles LandmarkTable::getNewLandmarkHandles(uint32_t num, uint32_t iter_count)
 {
+  static bool logged = false;
+  if (!logged)
+  {
+    logged = true;
+    LOG(ERROR) << "[ELIS] LandmarkTable ABI: sizeof(LandmarkHandle)="
+               << sizeof(LandmarkHandle)
+               << " sizeof(LandmarkHandles)=" << sizeof(LandmarkHandles)
+               << " sizeof(std::vector<int32_t>)=" << sizeof(std::vector<int32_t>)
+               << " maxSlot=" << LandmarkHandle::maxSlot()
+               << " maxVersion=" << LandmarkHandle::maxVersion();
+  }
+
   LandmarkHandles handles;
   handles.reserve(num);
   for (uint32_t i = 0u; i < c_capacity_; ++i)
@@ -52,6 +94,16 @@ LandmarkHandles LandmarkTable::getNewLandmarkHandles(uint32_t num, uint32_t iter
     LOG(ERROR) << "Landmark storage: " << typesFormattedString();
     LOG(FATAL) << "Landmark storage too small. Have only space for "
                << handles.size() << " but need " << num;
+  }
+
+  static int sample_log_count = 0;
+  if (sample_log_count++ < 5)
+  {
+    const std::string sample = format_handle_sample(handles, 8);
+    std::fprintf(stderr,
+                 "[ELIS] LandmarkTable handles: requested=%u returned=%zu sample=[%s]\n",
+                 num, handles.size(), sample.c_str());
+    std::fflush(stderr);
   }
 
   // Set types:

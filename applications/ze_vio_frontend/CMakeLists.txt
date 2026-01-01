@@ -61,7 +61,7 @@ set(SOURCES
   src/track_extractor.cpp
   )
 
-cs_add_library(${PROJECT_NAME} ${SOURCES} ${HEADERS})
+cs_add_library(${PROJECT_NAME} SHARED ${SOURCES} ${HEADERS})
 
 # Optional: link ElisUltimateLink core when its build outputs are available.
 # Look for a prebuilt libelis_link_core in the sibling elisUltimateLink build dir.
@@ -238,6 +238,14 @@ if(ELIS_LINK_CORE_LIB)
     endif()
     target_compile_definitions(elis_link_live PRIVATE HAVE_METAVISION_SDK)
   endif()
+
+  # RT1060 telemetry runner (serial CDC). Uses ELIS link for keypoints.
+  add_executable(elis_link_rt1060 src/elis_link_rt1060.cpp)
+  target_link_libraries(elis_link_rt1060
+    ${PROJECT_NAME}
+    ${ELIS_LINK_CORE_LIB}
+    ${catkin_LIBRARIES})
+  target_compile_definitions(elis_link_rt1060 PRIVATE ELIS_LINK_ENABLED)
 endif()
 
 ##########

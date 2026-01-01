@@ -3,6 +3,9 @@
 
 #include <ze/vio_frontend/elis_link_handles.hpp>
 
+#include <algorithm>
+#include <sstream>
+#include <string>
 #include <unordered_set>
 
 #include <ze/common/logging.hpp>
@@ -25,6 +28,46 @@ inline void ensure_slot_version_valid(LandmarkTable& landmarks, const uint32_t s
   {
     v = c_landmark_version_min_valid;
   }
+}
+
+std::string format_track_id_sample(const std::vector<int32_t>& ids, const size_t max_count)
+{
+  std::ostringstream oss;
+  const size_t count = std::min(ids.size(), max_count);
+  for (size_t i = 0; i < count; ++i)
+  {
+    if (i > 0)
+    {
+      oss << ',';
+    }
+    oss << ids[i];
+  }
+  if (ids.size() > count)
+  {
+    oss << "...";
+  }
+  return oss.str();
+}
+
+std::string format_handle_sample(const LandmarkHandles& handles, const size_t max_count)
+{
+  std::ostringstream oss;
+  const size_t count = std::min(handles.size(), max_count);
+  for (size_t i = 0; i < count; ++i)
+  {
+    if (i > 0)
+    {
+      oss << ',';
+    }
+    const LandmarkHandle& h = handles[i];
+    oss << h.slot() << ":" << static_cast<int>(h.version())
+        << "(" << static_cast<uint32_t>(h.handle) << ")";
+  }
+  if (handles.size() > count)
+  {
+    oss << "...";
+  }
+  return oss.str();
 }
 
 }  // namespace
@@ -118,11 +161,44 @@ ElisLinkHandleStats ensureElisLandmarkHandles(
       landmarks.getNewLandmarkHandles(static_cast<uint32_t>(missing_track_ids.size()), nframe_seq);
   // Be explicit: we requested one handle per missing track id.
   stats.allocated_handles = missing_track_ids.size();
+  const bool size_mismatch = new_handles.size() != missing_track_ids.size();
+  if (size_mismatch)
+  {
+    LOG(ERROR) << "[ELIS] Landmark handle allocation mismatch: requested "
+               << missing_track_ids.size() << " got " << new_handles.size();
+    static int mismatch_log_count = 0;
+    if (mismatch_log_count++ < 5)
+    {
+      const size_t dupes = track_ids.size() - unique_track_ids.size();
+      LOG(ERROR) << "[ELIS] Handle allocation debug: input_tracks=" << track_ids.size()
+                 << " unique=" << unique_track_ids.size()
+                 << " dupes=" << dupes
+                 << " missing=" << missing_track_ids.size()
+                 << " track_to_handle=" << track_to_handle.size()
+                 << " nframe_seq=" << nframe_seq
+                 << " capacity=" << LandmarkTable::c_capacity_
+                 << " sizeof(LandmarkHandle)=" << sizeof(LandmarkHandle)
+                 << " sizeof(LandmarkHandles)=" << sizeof(LandmarkHandles)
+                 << " sizeof(std::vector<int32_t>)=" << sizeof(std::vector<int32_t>)
+                 << " missing_ids_sample=[" << format_track_id_sample(missing_track_ids, 8) << "]"
+                 << " new_handles_sample=[" << format_handle_sample(new_handles, 8) << "]";
+    }
+  }
 
-  for (size_t i = 0; i < missing_track_ids.size(); ++i)
+  const size_t assign_count = std::min(missing_track_ids.size(), new_handles.size());
+  for (size_t i = 0; i < assign_count; ++i)
   {
     const int32_t track_id = missing_track_ids[i];
     LandmarkHandle h = new_handles[i];
+
+    if (h.slot() >= LandmarkTable::c_capacity_)
+    {
+      LOG(ERROR) << "[ELIS] Invalid landmark slot " << h.slot()
+                 << " (capacity=" << LandmarkTable::c_capacity_ << ", handle=" << h
+                 << ") for track_id=" << track_id;
+      ++stats.missing_invalid_handle;
+      continue;
+    }
 
     // Defensive: make sure the table's version is never below the minimum valid
     // value. If a slot's version becomes 0/1 (e.g. due to a stale build or
@@ -156,6 +232,12 @@ ElisLinkHandleStats ensureElisLandmarkHandles(
 
     track_to_handle[track_id] = h;
     landmarks.seed(h) = seed_prototype;
+  }
+
+  if (size_mismatch && new_handles.size() < missing_track_ids.size())
+  {
+    LOG(ERROR) << "[ELIS] Missing " << (missing_track_ids.size() - new_handles.size())
+               << " handles; leaving those track_ids unmapped this frame.";
   }
 
   return stats;

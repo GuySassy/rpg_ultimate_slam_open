@@ -38,6 +38,7 @@
 #ifdef ELIS_LINK_ENABLED
 #include <elisUltimateLink/frame_populator.hpp>
 #include <elisUltimateLink/keypoint_service.hpp>
+#include <elisUltimateLink/synchronizer_bridge.hpp>
 #endif
 
 #include <unordered_map>
@@ -77,6 +78,10 @@ DEFINE_double(vio_frame_norm_factor, 3.0,
 
 DEFINE_bool(vio_elis_link_diag, false,
             "Print ELIS track-id continuity diagnostics per slice (ID overlap + displacement).");
+DEFINE_bool(vio_elis_use_cached_packets, false,
+            "Use cached KeypointPackets keyed by slice timestamp (e.g. firmware keypoints).");
+DEFINE_string(vio_elis_adapter_module, "elis_link_adapter",
+              "Python adapter module used by ElisKeypointService.");
 DEFINE_string(vio_elis_detection_mode, "harris",
               "elis_code keypoint detector mode: harris|snn|cpp.");
 DEFINE_int32(vio_elis_tracking_distance_px, 15,
@@ -110,6 +115,7 @@ bool ensure_elis_configured(ElisLinkState& state)
 
   try
   {
+    state.service_config.adapter_module = FLAGS_vio_elis_adapter_module;
     state.service_config.detection_mode = FLAGS_vio_elis_detection_mode;
     state.service_config.tracking_distance_px = FLAGS_vio_elis_tracking_distance_px;
     state.service_config.min_track_length = FLAGS_vio_elis_min_track_length;
@@ -136,42 +142,57 @@ bool populate_frame_from_elis(const EventArray& events,
     return false;
   }
 
-  if (!ensure_elis_configured(state))
-  {
-    return false;
-  }
-
-  std::vector<int32_t> xs;
-  std::vector<int32_t> ys;
-  std::vector<float> ts_us;
-  std::vector<int32_t> ps;
-  xs.reserve(events.size());
-  ys.reserve(events.size());
-  ts_us.reserve(events.size());
-  ps.reserve(events.size());
-
   if (state.t0_ns < 0)
   {
     state.t0_ns = events.front().ts.toNSec();
   }
-  const int64_t t0_ns = state.t0_ns;
-  for (const dvs_msgs::Event& ev : events)
+  elis_link::KeypointPacket packet;
+  bool used_cached_packet = false;
+  const int64_t slice_stamp_ns = events.back().ts.toNSec();
+  if (FLAGS_vio_elis_use_cached_packets)
   {
-    xs.push_back(static_cast<int32_t>(ev.x));
-    ys.push_back(static_cast<int32_t>(ev.y));
-    ts_us.push_back(static_cast<float>(ev.ts.toNSec() - t0_ns) * 1e-3f);
-    ps.push_back(ev.polarity ? 1 : 0);
+    used_cached_packet = elis_link::pop_cached_packet(slice_stamp_ns, &packet);
+    if (!used_cached_packet)
+    {
+      VLOG(1) << "[ELIS] No cached packet found for stamp " << slice_stamp_ns
+              << "; falling back to service.";
+    }
   }
 
-  elis_link::KeypointPacket packet;
-  try
+  if (!used_cached_packet)
   {
-    packet = state.service.process_batch(xs, ys, ts_us, ps);
-  }
-  catch (const std::exception& e)
-  {
-    LOG(ERROR) << "ElisKeypointService process_batch failed: " << e.what();
-    return false;
+    if (!ensure_elis_configured(state))
+    {
+      return false;
+    }
+
+    std::vector<int32_t> xs;
+    std::vector<int32_t> ys;
+    std::vector<float> ts_us;
+    std::vector<int32_t> ps;
+    xs.reserve(events.size());
+    ys.reserve(events.size());
+    ts_us.reserve(events.size());
+    ps.reserve(events.size());
+
+    const int64_t t0_ns = state.t0_ns;
+    for (const dvs_msgs::Event& ev : events)
+    {
+      xs.push_back(static_cast<int32_t>(ev.x));
+      ys.push_back(static_cast<int32_t>(ev.y));
+      ts_us.push_back(static_cast<float>(ev.ts.toNSec() - t0_ns) * 1e-3f);
+      ps.push_back(ev.polarity ? 1 : 0);
+    }
+
+    try
+    {
+      packet = state.service.process_batch(xs, ys, ts_us, ps);
+    }
+    catch (const std::exception& e)
+    {
+      LOG(ERROR) << "ElisKeypointService process_batch failed: " << e.what();
+      return false;
+    }
   }
 
   if (packet.empty())
@@ -297,7 +318,19 @@ bool populate_frame_from_elis(const EventArray& events,
   for (uint32_t i = 0; i < static_cast<uint32_t>(packet_count); ++i)
   {
     const int32_t track_id = packet.track_ids[i];
-    const LandmarkHandle h = state.track_to_handle.at(track_id);
+    const auto handle_it = state.track_to_handle.find(track_id);
+    if (handle_it == state.track_to_handle.end())
+    {
+      LOG(WARNING) << "[ELIS] Missing handle for track_id=" << track_id;
+      continue;
+    }
+    const LandmarkHandle h = handle_it->second;
+    if (h.slot() >= LandmarkTable::c_capacity_)
+    {
+      LOG(ERROR) << "[ELIS] Handle slot out of bounds: " << h.slot()
+                 << " (track_id=" << track_id << ")";
+      continue;
+    }
     const auto it = best_by_handle.find(h.handle);
     if (it == best_by_handle.end())
     {
