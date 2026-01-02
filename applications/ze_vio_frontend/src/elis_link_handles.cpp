@@ -70,6 +70,19 @@ std::string format_handle_sample(const LandmarkHandles& handles, const size_t ma
   return oss.str();
 }
 
+size_t count_inactive_slots(const LandmarkTable& landmarks)
+{
+  size_t count = 0;
+  for (const auto& type : landmarks.types())
+  {
+    if (isLandmarkInactive(type))
+    {
+      ++count;
+    }
+  }
+  return count;
+}
+
 }  // namespace
 
 ElisLinkHandleStats ensureElisLandmarkHandles(
@@ -155,6 +168,26 @@ ElisLinkHandleStats ensureElisLandmarkHandles(
   if (missing_track_ids.empty())
   {
     return stats;
+  }
+
+  const size_t available_slots = count_inactive_slots(landmarks);
+  if (missing_track_ids.size() > available_slots)
+  {
+    const size_t dropped = missing_track_ids.size() - available_slots;
+    static int shortage_log_count = 0;
+    if (shortage_log_count++ < 5)
+    {
+      LOG(ERROR) << "[ELIS] Not enough landmark slots: missing=" << missing_track_ids.size()
+                 << " available=" << available_slots
+                 << " track_to_handle=" << track_to_handle.size()
+                 << " capacity=" << LandmarkTable::c_capacity_
+                 << " dropping=" << dropped;
+    }
+    missing_track_ids.resize(available_slots);
+    if (missing_track_ids.empty())
+    {
+      return stats;
+    }
   }
 
   const LandmarkHandles new_handles =

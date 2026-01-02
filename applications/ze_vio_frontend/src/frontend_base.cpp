@@ -80,6 +80,8 @@ DEFINE_bool(vio_elis_link_diag, false,
             "Print ELIS track-id continuity diagnostics per slice (ID overlap + displacement).");
 DEFINE_bool(vio_elis_use_cached_packets, false,
             "Use cached KeypointPackets keyed by slice timestamp (e.g. firmware keypoints).");
+DEFINE_bool(vio_elis_require_cached_packets, false,
+            "When using cached packets, do not fall back to elis_code if a packet is missing.");
 DEFINE_string(vio_elis_adapter_module, "elis_link_adapter",
               "Python adapter module used by ElisKeypointService.");
 DEFINE_string(vio_elis_detection_mode, "harris",
@@ -88,6 +90,10 @@ DEFINE_int32(vio_elis_tracking_distance_px, 15,
              "elis_code max pixel distance for ID tracking across slices.");
 DEFINE_int32(vio_elis_min_track_length, 3,
              "elis_code minimum track length for stable IDs.");
+DEFINE_int32(vio_elis_track_ttl_frames, 0,
+             "Drop track IDs not seen for this many frames to free landmark slots (0 disables).");
+DEFINE_int32(vio_elis_max_keypoints_per_frame, 500,
+             "Cap ELIS keypoints per frame to avoid oversized packets (0 disables).");
 
 namespace ze {
 
@@ -99,6 +105,7 @@ struct ElisLinkState
   bool configured = false;
   std::unordered_map<int32_t, ze::LandmarkHandle> track_to_handle;
   std::unordered_map<int32_t, std::pair<float, float>> prev_track_px;
+  std::unordered_map<int32_t, uint32_t> track_last_seen_seq;
   int64_t t0_ns = -1;
 #endif
 };
@@ -130,6 +137,54 @@ bool ensure_elis_configured(ElisLinkState& state)
   }
 }
 
+void prune_elis_tracks(ElisLinkState& state,
+                       LandmarkTable& landmarks,
+                       const uint32_t nframe_seq)
+{
+  const int32_t ttl = FLAGS_vio_elis_track_ttl_frames;
+  if (ttl <= 0 || state.track_last_seen_seq.empty())
+  {
+    return;
+  }
+
+  size_t removed = 0;
+  for (auto it = state.track_last_seen_seq.begin();
+       it != state.track_last_seen_seq.end();)
+  {
+    const uint32_t last_seen = it->second;
+    if (nframe_seq > last_seen &&
+        (nframe_seq - last_seen) > static_cast<uint32_t>(ttl))
+    {
+      const int32_t track_id = it->first;
+      const auto handle_it = state.track_to_handle.find(track_id);
+      if (handle_it != state.track_to_handle.end())
+      {
+        const LandmarkHandle h = handle_it->second;
+        if (h.slot() < LandmarkTable::c_capacity_)
+        {
+          landmarks.resetLandmark(h);
+        }
+        state.track_to_handle.erase(handle_it);
+      }
+      state.prev_track_px.erase(track_id);
+      it = state.track_last_seen_seq.erase(it);
+      ++removed;
+      continue;
+    }
+    ++it;
+  }
+
+  if (removed > 0)
+  {
+    static int prune_log_count = 0;
+    if (prune_log_count++ < 5)
+    {
+      LOG(INFO) << "[ELIS] Pruned " << removed
+                << " stale track ids (ttl_frames=" << ttl << ").";
+    }
+  }
+}
+
 bool populate_frame_from_elis(const EventArray& events,
                               const Camera& cam,
                               const uint32_t nframe_seq,
@@ -154,6 +209,19 @@ bool populate_frame_from_elis(const EventArray& events,
     used_cached_packet = elis_link::pop_cached_packet(slice_stamp_ns, &packet);
     if (!used_cached_packet)
     {
+      if (FLAGS_vio_elis_require_cached_packets)
+      {
+        static int missing_log_count = 0;
+        if (missing_log_count++ < 5)
+        {
+          LOG(WARNING) << "[ELIS] Missing cached packet for stamp " << slice_stamp_ns
+                       << "; returning empty frame.";
+        }
+        frame.num_features_ = 0u;
+        frame.seeds_index_from_ = 0u;
+        frame.seeds_index_to_ = 0u;
+        return true;
+      }
       VLOG(1) << "[ELIS] No cached packet found for stamp " << slice_stamp_ns
               << "; falling back to service.";
     }
@@ -203,6 +271,19 @@ bool populate_frame_from_elis(const EventArray& events,
     frame.seeds_index_to_ = 0u;
     return true;
   }
+
+  if (FLAGS_vio_elis_track_ttl_frames > 0)
+  {
+    state.track_last_seen_seq.reserve(state.track_last_seen_seq.size() + packet.size());
+    for (const int32_t track_id : packet.track_ids)
+    {
+      state.track_last_seen_seq[track_id] = nframe_seq;
+    }
+  }
+
+  // Prune stale tracks before allocating new handles so freed slots are
+  // immediately available for this slice.
+  prune_elis_tracks(state, landmarks, nframe_seq);
 
   const bool diag_enabled = FLAGS_vio_elis_link_diag;
   std::unordered_map<int32_t, std::pair<float, float>> diag_curr_track_px;
@@ -358,10 +439,40 @@ bool populate_frame_from_elis(const EventArray& events,
                  << " duplicate-handle keypoints (kept strongest per handle).";
   }
 
-  const std::size_t count = selected_idx.size();
+  std::size_t count = selected_idx.size();
+  if (FLAGS_vio_elis_max_keypoints_per_frame > 0 &&
+      count > static_cast<std::size_t>(FLAGS_vio_elis_max_keypoints_per_frame))
+  {
+    const std::size_t target = static_cast<std::size_t>(FLAGS_vio_elis_max_keypoints_per_frame);
+    std::nth_element(
+        selected_idx.begin(),
+        selected_idx.begin() + target,
+        selected_idx.end(),
+        [&](uint32_t a, uint32_t b) {
+          return data.strengths(static_cast<int>(a)) >
+                 data.strengths(static_cast<int>(b));
+        });
+    selected_idx.resize(target);
+    std::sort(selected_idx.begin(), selected_idx.end());
+    LOG(WARNING) << "[ELIS] Capped keypoints to " << target
+                 << " from " << count;
+    count = selected_idx.size();
+  }
+
+  const bool has_descriptors =
+      (data.descriptor_stride > 0 &&
+       data.descriptors.rows() > 0 &&
+       data.descriptors.cols() > 0);
   frame.ensureFeatureCapacity(static_cast<uint32_t>(count));
-  frame.descriptors_.resize(static_cast<int>(data.descriptors.rows()),
-                            static_cast<int>(count));
+  if (has_descriptors)
+  {
+    frame.descriptors_.resize(static_cast<int>(data.descriptors.rows()),
+                              static_cast<int>(count));
+  }
+  else
+  {
+    frame.descriptors_.resize(0, 0);
+  }
 
   // Order features so that all "seed" handles (obs empty) are at the end.
   std::vector<uint32_t> nonseed_idx;
@@ -398,7 +509,10 @@ bool populate_frame_from_elis(const EventArray& events,
     frame.type_vec_(j) = 0;
     frame.angle_vec_(j) = 0.0;
     frame.score_vec_(j) = data.strengths(static_cast<int>(i));
-    frame.descriptors_.col(j) = data.descriptors.col(static_cast<int>(i));
+    if (has_descriptors && static_cast<int>(i) < data.descriptors.cols())
+    {
+      frame.descriptors_.col(j) = data.descriptors.col(static_cast<int>(i));
+    }
 
     const int32_t track_id = packet.track_ids[i];
     frame.landmark_handles_[j] = state.track_to_handle.at(track_id);

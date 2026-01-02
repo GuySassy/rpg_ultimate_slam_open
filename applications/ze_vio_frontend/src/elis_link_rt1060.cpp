@@ -47,6 +47,8 @@ DEFINE_bool(elis_rt1060_drop_empty_raw, true,
 
 DECLARE_bool(vio_use_elis_link);
 DECLARE_bool(vio_elis_use_cached_packets);
+DECLARE_bool(vio_elis_require_cached_packets);
+DECLARE_int32(vio_elis_track_ttl_frames);
 
 namespace {
 
@@ -462,6 +464,12 @@ int main(int argc, char** argv)
   if (use_firmware)
   {
     FLAGS_vio_elis_use_cached_packets = true;
+    FLAGS_vio_elis_require_cached_packets = true;
+    if (FLAGS_vio_elis_track_ttl_frames <= 0)
+    {
+      FLAGS_vio_elis_track_ttl_frames = 2;
+      LOG(WARNING) << "[RT1060] Enabling --vio_elis_track_ttl_frames=2 for firmware keypoints.";
+    }
   }
 
   ze::VisualOdometry vo;
@@ -584,6 +592,15 @@ int main(int argc, char** argv)
       {
         slice.packet = std::move(packet);
         slice.has_packet = true;
+      }
+      else
+      {
+        static int missing_kp_log_count = 0;
+        if (missing_kp_log_count++ < 5)
+        {
+          LOG(WARNING) << "[RT1060] Firmware packet missing keypoints (seq="
+                       << pkt.seq << ", ts_us=" << pkt.ts_us << ").";
+        }
       }
     }
 
