@@ -74,7 +74,8 @@ using DVSCallback =
 enum class DataProviderType {
   Csv,
   Rosbag,
-  Rostopic
+  Rostopic,
+  Rt1060
 };
 
 //! A data provider registers to a data source and triggers callbacks when

@@ -31,6 +31,7 @@
 #include <ze/data_provider/data_provider_csv.hpp>
 #include <ze/data_provider/data_provider_rosbag.hpp>
 #include <ze/data_provider/data_provider_rostopic.hpp>
+#include <ze/data_provider/data_provider_rt1060.hpp>
 
 DEFINE_string(bag_filename, "dataset.bag", "Name of bagfile in data_dir.");
 
@@ -59,7 +60,7 @@ DEFINE_string(topic_gyr1, "/gyr1", "");
 DEFINE_string(topic_gyr2, "/gyr2", "");
 DEFINE_string(topic_gyr3, "/gyr3", "");
 
-DEFINE_int32(data_source, 1, " 0: CSV, 1: Rosbag, 2: Rostopic");
+DEFINE_int32(data_source, 1, " 0: CSV, 1: Rosbag, 2: Rostopic, 3: RT1060");
 DEFINE_string(data_dir, "", "Directory for csv dataset.");
 DEFINE_uint64(num_imus, 1, "Number of IMUs used in the pipeline.");
 DEFINE_uint64(num_cams, 1, "Number of normal cameras used in the pipeline.");
@@ -67,6 +68,17 @@ DEFINE_uint64(num_dvs, 1, "Number of event cameras used in the pipeline.");
 DEFINE_uint64(num_accels, 0, "Number of Accelerometers used in the pipeline.");
 DEFINE_uint64(num_gyros, 0, "Number of Gyroscopes used in the pipeline.");
 DEFINE_double(timeshift_cam_imu, 0., "Delay between cam and IMU timestamps.");
+
+DEFINE_string(rt1060_port, "/dev/ttyACM0",
+              "RT1060 serial device (e.g. /dev/ttyACM0).");
+DEFINE_int32(rt1060_baud, 115200,
+             "RT1060 serial baud rate (USB CDC ignores but required by API).");
+DEFINE_string(rt1060_keypoint_source, "elis_code",
+              "RT1060 keypoint source: elis_code or firmware.");
+DEFINE_int32(rt1060_queue_size, 2,
+             "RT1060 provider queue size for decoded slices.");
+DEFINE_bool(rt1060_drop_empty_raw, true,
+            "RT1060 provider drops packets with no raw events.");
 
 namespace ze {
 
@@ -154,6 +166,17 @@ DataProviderBase::Ptr loadDataProviderFromGflags(const uint32_t num_cams)
                                                      100u));
       }
 
+      break;
+    }
+    case 3: // RT1060
+    {
+      const bool use_firmware = (FLAGS_rt1060_keypoint_source == "firmware");
+      data_provider.reset(new DataProviderRt1060(
+        FLAGS_rt1060_port,
+        FLAGS_rt1060_baud,
+        use_firmware,
+        FLAGS_rt1060_drop_empty_raw,
+        FLAGS_rt1060_queue_size));
       break;
     }
     default:
