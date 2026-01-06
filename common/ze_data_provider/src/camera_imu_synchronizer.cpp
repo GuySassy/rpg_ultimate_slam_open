@@ -208,6 +208,8 @@ void CameraImuSynchronizer::checkImuDataAndEventsCallback()
   }
 
   std::vector<bool> discard_event_packet(event_packages_ready_to_process_.size(), false);
+  static bool warned_no_imu = false;
+  static bool warned_non_monotonic = false;
 
   for(size_t i = 0; i < event_packages_ready_to_process_.size(); ++i)
   {
@@ -215,6 +217,52 @@ void CameraImuSynchronizer::checkImuDataAndEventsCallback()
     const int64_t event_package_stamp = event_package.first;
 
     VLOG(1000) << "Current event package stamp:" << event_package_stamp;
+
+    if (num_imus_ == 0u)
+    {
+      if (!warned_no_imu)
+      {
+        warned_no_imu = true;
+        LOG(WARNING) << "No IMU configured; using zero-motion IMU samples for event packets.";
+      }
+
+      const EventArrayPtr& events_ptr = event_package.second;
+      if (!events_imu_callback_ || !events_ptr || events_ptr->empty())
+      {
+        discard_event_packet[i] = true;
+        continue;
+      }
+
+      const int64_t t_end_ns = event_package_stamp;
+      int64_t t_start_ns = (last_event_package_broadcast_stamp_ >= 0)
+                             ? last_event_package_broadcast_stamp_
+                             : events_ptr->front().ts.toNSec();
+      if (t_end_ns <= t_start_ns)
+      {
+        if (!warned_non_monotonic)
+        {
+          warned_non_monotonic = true;
+          LOG(WARNING) << "Non-monotonic event packet stamps; dropping packet to keep IMU stamps ordered.";
+        }
+        discard_event_packet[i] = true;
+        continue;
+      }
+      const int64_t t_mid_ns = t_start_ns + (t_end_ns - t_start_ns) / 2;
+
+      ImuStamps imu_stamps(3);
+      imu_stamps << t_start_ns, t_mid_ns, t_end_ns;
+
+      ImuAccGyrContainer imu_accgyr(6, 3);
+      imu_accgyr.setZero();
+
+      ImuStampsVector imu_timestamps{imu_stamps};
+      ImuAccGyrVector imu_measurements{imu_accgyr};
+      events_imu_callback_(event_package, imu_timestamps, imu_measurements);
+
+      last_event_package_broadcast_stamp_ = t_end_ns;
+      discard_event_packet[i] = true;
+      continue;
+    }
 
     // always provide imu structures in the callback (empty if no imu present)
     ImuStampsVector imu_timestamps(num_imus_);

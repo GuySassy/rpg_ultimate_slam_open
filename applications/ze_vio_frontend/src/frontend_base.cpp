@@ -1724,20 +1724,40 @@ bool FrontendBase::pollBackend(bool block)
   // Reset integration point using newest result from backend.
   odom_.v_W = states_.v_W(states_.nframeHandleK());
 
+  const int64_t stamp_from = states_.nframeK()->timestamp();
+  const int64_t stamp_to = odom_.stamp;
+
+  int64_t oldest_stamp = 0;
+  int64_t newest_stamp = 0;
+  bool imu_ok = false;
+  std::tie(oldest_stamp, newest_stamp, imu_ok) =
+      imu_buffer_.getOldestAndNewestStamp();
+
+  if (!imu_ok ||
+      stamp_from >= stamp_to ||
+      stamp_from < oldest_stamp ||
+      stamp_to > newest_stamp)
+  {
+    odom_.T_W_B = states_.T_Bk_W().inverse();
+    odom_.stamp = stamp_from;
+    if (stage_ == FrontendStage::AttitudeEstimation)
+    {
+      stage_ = FrontendStage::Initializing;
+    }
+    return true;
+  }
+
   ImuStamps imu_timestamps;
   ImuAccGyrContainer imu_measurements;
-
   std::tie(imu_timestamps, imu_measurements) =
-    imu_buffer_.getBetweenValuesInterpolated(
-      states_.nframeK()->timestamp(),
-      odom_.stamp);
+      imu_buffer_.getBetweenValuesInterpolated(stamp_from, stamp_to);
 
   Transformation T_Bkm1_Bk =
-    imu_integrator_->integrateImu(
-      imu_timestamps,
-      imu_measurements,
-      states_.T_Bk_W(),
-      odom_.v_W);
+      imu_integrator_->integrateImu(
+        imu_timestamps,
+        imu_measurements,
+        states_.T_Bk_W(),
+        odom_.v_W);
 
   odom_.T_W_B = states_.T_Bk_W().inverse() * T_Bkm1_Bk;
 

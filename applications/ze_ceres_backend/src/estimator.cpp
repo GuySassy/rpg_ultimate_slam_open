@@ -374,7 +374,7 @@ bool Estimator::addStates(
 bool Estimator::addLandmark(LandmarkHandle landmark_handle,
                             const Eigen::Vector4d& landmark)
 {
-  BackendId landmark_ze_id = createLandmarkId(landmark_handle.handle);
+  BackendId landmark_ze_id = createLandmarkId(landmark_handle);
 
   std::shared_ptr<nlls::HomogeneousPointParameterBlock>
       point_parameter_block =
@@ -1396,5 +1396,4 @@ bool Estimator::setSpeedAndBiasEstimate(BackendId id, const SpeedAndBias& sab)
 }
 
 }  // namespace ze
-
 

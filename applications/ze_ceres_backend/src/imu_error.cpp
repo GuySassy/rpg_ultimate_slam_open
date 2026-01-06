@@ -304,6 +304,11 @@ int ImuError::propagation(const ImuStamps& imu_stamps,
                           jacobian_t* jacobian)
 {
   DEBUG_CHECK_EQ(imu_stamps.rows(), imu_acc_gyr.cols());
+  if (imu_stamps.rows() < 2)
+  {
+    LOG(WARNING) << "IMU propagation requires at least 2 measurements.";
+    return -1;
+  }
   // now the propagation
   int64_t time = t_start;
   int64_t end = t_end;
@@ -341,7 +346,7 @@ int ImuError::propagation(const ImuStamps& imu_stamps,
   double Delta_t = 0;
   bool hasStarted = false;
   int num_propagated = 0;
-  for (int i = 0; i < imu_stamps.rows(); ++i)
+  for (int i = 0; i + 1 < imu_stamps.rows(); ++i)
   {
     Eigen::Vector3d omega_S_0 = imu_acc_gyr.col(i).tail<3>();
     Eigen::Vector3d acc_S_0 = imu_acc_gyr.col(i).head<3>();
