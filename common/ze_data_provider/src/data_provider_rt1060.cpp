@@ -18,6 +18,8 @@
 #include <chrono>
 #include <cerrno>
 #include <fcntl.h>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -27,12 +29,21 @@
 namespace ze {
 namespace {
 
-constexpr uint16_t kMagic = 0xABCD;
+constexpr uint8_t kMagicBytes[2] = {0xCD, 0xAB};
+constexpr size_t kMagicSize = 2;
 constexpr uint8_t kFlagHasRaw = 0x01;
 constexpr uint8_t kFlagHasKp = 0x02;
 constexpr uint8_t kFlagHasImu = 0x04;
 constexpr uint8_t kFlagHasAccel = 0x08;
+constexpr uint8_t kFlagRawXYOnly = 0x10;
+constexpr uint8_t kFlagImuTs = 0x20;
+constexpr uint8_t kFlagKpId = 0x40;
 constexpr size_t kHeaderSize = 14;
+constexpr size_t kTailSize = 2;
+constexpr size_t kMaxKeypoints = 512;
+constexpr size_t kMaxRawEvents = 16384;
+constexpr size_t kMaxDescLen = 128;
+constexpr size_t kMaxPacketBytes = 128 * 1024;
 
 uint16_t read_le_u16(const uint8_t* data)
 {
@@ -70,9 +81,57 @@ struct Rt1060Packet
   uint16_t n_raw = 0;
   uint16_t n_kp = 0;
   uint8_t kp_desc_len = 0;
+  bool raw_xy_only = false;
+  bool kp_has_id = false;
+  bool has_imu_ts = false;
+  uint32_t imu_ts_us = 0;
   std::vector<uint8_t> kp_bytes;
   std::vector<uint8_t> raw_bytes;
 };
+
+struct Rt1060DecodeConfig
+{
+  bool allow_xy_only_synth = false;
+  int xy_only_window_us = 3000;
+  bool xy_only_polarity = true;
+  Rt1060TsAnchor ts_anchor = Rt1060TsAnchor::End;
+};
+
+struct Rt1060Stats
+{
+  uint64_t packets_parsed = 0;
+  uint64_t checksum_failures = 0;
+  uint64_t resyncs = 0;
+  uint64_t bytes_received = 0;
+  uint64_t queue_drops = 0;
+  uint64_t events_emitted = 0;
+};
+
+struct Rt1060EventDebug
+{
+  size_t count = 0;
+  uint64_t total_dt = 0;
+  int64_t base_us = -1;
+  int64_t end_us = -1;
+  bool xy_only = false;
+};
+
+enum class ParseResult
+{
+  NeedMore,
+  Parsed,
+  Resync
+};
+
+uint8_t xor_checksum(const uint8_t* data, size_t len)
+{
+  uint8_t c = 0;
+  for (size_t i = 0; i < len; ++i)
+  {
+    c ^= data[i];
+  }
+  return c;
+}
 
 class SerialPort
 {
@@ -123,6 +182,32 @@ public:
     }
   }
 
+  ssize_t read_some(uint8_t* buf, size_t n) const
+  {
+    if (!running_)
+    {
+      return 0;
+    }
+    while (running_)
+    {
+      const ssize_t r = ::read(fd_, buf, n);
+      if (r >= 0)
+      {
+        return r;
+      }
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+      {
+        return 0;
+      }
+      return -1;
+    }
+    return 0;
+  }
+
   bool read_exact(uint8_t* buf, size_t n) const
   {
     size_t offset = 0;
@@ -153,103 +238,280 @@ private:
   int fd_ = -1;
 };
 
-bool sync_to_magic(const SerialPort& port, volatile bool& running)
+ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
+                             Rt1060Packet* out,
+                             Rt1060Stats* stats)
 {
-  uint8_t b0 = 0;
-  if (!port.read_exact(&b0, 1))
+  if (buffer.size() < kMagicSize)
   {
-    return false;
-  }
-  while (running)
-  {
-    uint8_t b1 = 0;
-    if (!port.read_exact(&b1, 1))
-    {
-      return false;
-    }
-    const uint16_t magic = static_cast<uint16_t>(b0) | (static_cast<uint16_t>(b1) << 8);
-    if (magic == kMagic)
-    {
-      return true;
-    }
-    b0 = b1;
-  }
-  return false;
-}
-
-bool read_packet(const SerialPort& port, Rt1060Packet* out, volatile bool& running)
-{
-  if (!sync_to_magic(port, running))
-  {
-    return false;
+    return ParseResult::NeedMore;
   }
 
-  uint8_t hdr[kHeaderSize] = {0};
-  if (!port.read_exact(hdr, sizeof(hdr)))
+  auto it = std::search(buffer.begin(), buffer.end(),
+                        std::begin(kMagicBytes), std::end(kMagicBytes));
+  if (it == buffer.end())
   {
-    return false;
+    if (!buffer.empty())
+    {
+      if (buffer.back() == kMagicBytes[0])
+      {
+        buffer.erase(buffer.begin(), buffer.end() - 1);
+      }
+      else
+      {
+        buffer.clear();
+      }
+    }
+    return ParseResult::NeedMore;
+  }
+
+  if (it != buffer.begin())
+  {
+    buffer.erase(buffer.begin(), it);
+    if (stats)
+    {
+      stats->resyncs++;
+    }
+  }
+
+  if (buffer.size() < (kMagicSize + kHeaderSize))
+  {
+    return ParseResult::NeedMore;
+  }
+
+  const uint8_t* hdr = buffer.data() + kMagicSize;
+  const uint8_t version = hdr[0];
+  const uint8_t flags = hdr[1];
+  const uint16_t seq = read_le_u16(hdr + 2);
+  const uint32_t ts_us = read_le_u32(hdr + 4);
+  const uint16_t n_raw = read_le_u16(hdr + 8);
+  const uint16_t n_kp = read_le_u16(hdr + 10);
+  const uint8_t kp_desc_len = hdr[12];
+
+  const bool has_raw = (flags & kFlagHasRaw) != 0;
+  const bool has_kp = (flags & kFlagHasKp) != 0;
+  const bool has_imu = (flags & kFlagHasImu) != 0;
+  const bool has_accel = (flags & kFlagHasAccel) != 0;
+  const bool raw_xy_only = (flags & kFlagRawXYOnly) != 0;
+  const bool has_imu_ts = (flags & kFlagImuTs) != 0;
+  const bool kp_has_id = (flags & kFlagKpId) != 0;
+
+  if (n_kp > kMaxKeypoints || n_raw > kMaxRawEvents || kp_desc_len > kMaxDescLen)
+  {
+    buffer.erase(buffer.begin());
+    if (stats)
+    {
+      stats->resyncs++;
+    }
+    return ParseResult::Resync;
+  }
+
+  const size_t kp_stride = has_kp ? (static_cast<size_t>(kp_has_id ? 10 : 8) + kp_desc_len) : 0u;
+  const size_t kp_bytes = has_kp ? (static_cast<size_t>(n_kp) * kp_stride) : 0u;
+  const size_t raw_stride = raw_xy_only ? 4u : 6u;
+  const size_t raw_bytes = has_raw ? (static_cast<size_t>(n_raw) * raw_stride) : 0u;
+  size_t payload_len = kp_bytes + raw_bytes;
+  if (has_accel)
+  {
+    payload_len += 6u;
+  }
+  if (has_imu)
+  {
+    payload_len += 6u;
+  }
+  if (has_imu_ts)
+  {
+    payload_len += 4u;
+  }
+
+  const size_t packet_len = kMagicSize + kHeaderSize + payload_len + kTailSize;
+  if (packet_len > kMaxPacketBytes)
+  {
+    buffer.erase(buffer.begin());
+    if (stats)
+    {
+      stats->resyncs++;
+    }
+    return ParseResult::Resync;
+  }
+
+  if (buffer.size() < packet_len)
+  {
+    return ParseResult::NeedMore;
+  }
+
+  const size_t checksum_offset = kMagicSize + kHeaderSize + payload_len;
+  const uint8_t expected_checksum = buffer[checksum_offset];
+  const uint8_t computed_checksum =
+      xor_checksum(buffer.data(), kMagicSize + kHeaderSize + payload_len);
+  if (expected_checksum != computed_checksum)
+  {
+    if (stats)
+    {
+      stats->checksum_failures++;
+      stats->resyncs++;
+    }
+    buffer.erase(buffer.begin());
+    return ParseResult::Resync;
   }
 
   Rt1060Packet pkt;
-  pkt.version = hdr[0];
-  pkt.flags = hdr[1];
-  pkt.seq = read_le_u16(hdr + 2);
-  pkt.ts_us = read_le_u32(hdr + 4);
-  pkt.n_raw = read_le_u16(hdr + 8);
-  pkt.n_kp = read_le_u16(hdr + 10);
-  pkt.kp_desc_len = hdr[12];
+  pkt.version = version;
+  pkt.flags = flags;
+  pkt.seq = seq;
+  pkt.ts_us = ts_us;
+  pkt.n_raw = n_raw;
+  pkt.n_kp = n_kp;
+  pkt.kp_desc_len = kp_desc_len;
+  pkt.raw_xy_only = raw_xy_only;
+  pkt.kp_has_id = kp_has_id;
+  pkt.has_imu_ts = has_imu_ts;
 
-  if (pkt.flags & kFlagHasKp)
+  size_t offset = kMagicSize + kHeaderSize;
+  if (has_kp && kp_bytes > 0)
   {
-    const size_t kp_stride = static_cast<size_t>(8 + pkt.kp_desc_len);
-    const size_t kp_bytes = static_cast<size_t>(pkt.n_kp) * kp_stride;
-    pkt.kp_bytes.resize(kp_bytes);
-    if (!port.read_exact(pkt.kp_bytes.data(), kp_bytes))
-    {
-      return false;
-    }
+    pkt.kp_bytes.assign(
+        buffer.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset),
+        buffer.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset + kp_bytes));
+    offset += kp_bytes;
   }
-  if (pkt.flags & kFlagHasRaw)
+  if (has_raw && raw_bytes > 0)
   {
-    const size_t raw_bytes = static_cast<size_t>(pkt.n_raw) * 6;
-    pkt.raw_bytes.resize(raw_bytes);
-    if (!port.read_exact(pkt.raw_bytes.data(), raw_bytes))
-    {
-      return false;
-    }
+    pkt.raw_bytes.assign(
+        buffer.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset),
+        buffer.begin() + static_cast<std::vector<uint8_t>::difference_type>(offset + raw_bytes));
+    offset += raw_bytes;
   }
-  if (pkt.flags & kFlagHasAccel)
+  if (has_accel)
   {
-    uint8_t accel[6] = {0};
-    if (!port.read_exact(accel, sizeof(accel)))
-    {
-      return false;
-    }
+    offset += 6u;
   }
-  if (pkt.flags & kFlagHasImu)
+  if (has_imu)
   {
-    uint8_t imu[6] = {0};
-    if (!port.read_exact(imu, sizeof(imu)))
-    {
-      return false;
-    }
+    offset += 6u;
   }
-
-  uint8_t tail[2] = {0};
-  if (!port.read_exact(tail, sizeof(tail)))
+  if (has_imu_ts)
   {
-    return false;
+    if (offset + 4u <= buffer.size())
+    {
+      pkt.imu_ts_us = read_le_u32(buffer.data() + offset);
+    }
+    offset += 4u;
   }
 
-  *out = std::move(pkt);
-  return true;
+  buffer.erase(buffer.begin(),
+               buffer.begin() + static_cast<std::vector<uint8_t>::difference_type>(packet_len));
+  if (out)
+  {
+    *out = std::move(pkt);
+  }
+  return ParseResult::Parsed;
 }
 
-bool decode_events(const Rt1060Packet& pkt, EventArrayPtr* events_out, int64_t* stamp_ns_out)
+bool decode_events(const Rt1060Packet& pkt,
+                   const Rt1060DecodeConfig& cfg,
+                   EventArrayPtr* events_out,
+                   int64_t* stamp_ns_out,
+                   Rt1060EventDebug* debug_out)
 {
+  if (debug_out)
+  {
+    debug_out->count = 0;
+    debug_out->total_dt = 0;
+    debug_out->base_us = static_cast<int64_t>(pkt.ts_us);
+    debug_out->end_us = static_cast<int64_t>(pkt.ts_us);
+    debug_out->xy_only = pkt.raw_xy_only;
+  }
+
   if (pkt.raw_bytes.empty())
   {
     return false;
+  }
+
+  if (pkt.raw_xy_only)
+  {
+    if (!cfg.allow_xy_only_synth)
+    {
+      static int warned_xy_only = 0;
+      if (warned_xy_only++ < 3)
+      {
+        LOG(WARNING) << "[RT1060] RAW_XY_ONLY packet ignored (synth disabled).";
+      }
+      return false;
+    }
+
+    static int warned_xy_only_synth = 0;
+    if (warned_xy_only_synth++ < 1)
+    {
+      LOG(WARNING) << "[RT1060] RAW_XY_ONLY synth mode enabled; "
+                   << "timestamps are synthesized over a fixed window.";
+    }
+
+    const size_t count = pkt.raw_bytes.size() / 4;
+    if (count == 0)
+    {
+      return false;
+    }
+    const uint8_t* data = pkt.raw_bytes.data();
+
+    auto events = std::make_shared<EventArray>();
+    events->reserve(count);
+
+    int64_t t_end_us = static_cast<int64_t>(pkt.ts_us);
+    int64_t window_us = static_cast<int64_t>(cfg.xy_only_window_us);
+    if (window_us < 0)
+    {
+      window_us = 0;
+    }
+    int64_t t_start_us = t_end_us - window_us;
+    if (t_start_us < 0)
+    {
+      t_start_us = 0;
+    }
+    const int64_t span_us = t_end_us - t_start_us;
+    const int64_t steps = (count > 1) ? static_cast<int64_t>(count - 1) : 0;
+    const int64_t step_us = (steps > 0) ? (span_us / steps) : 0;
+    const int64_t rem_us = (steps > 0) ? (span_us % steps) : 0;
+
+    const bool pol = cfg.xy_only_polarity;
+    for (size_t i = 0; i < count; ++i)
+    {
+      const uint16_t x = read_le_u16(data);
+      const uint16_t y = read_le_u16(data + 2);
+      int64_t t_us = (count == 1)
+        ? t_end_us
+        : (t_start_us + step_us * static_cast<int64_t>(i) +
+           std::min<int64_t>(static_cast<int64_t>(i), rem_us));
+      if (t_us < 0)
+      {
+        t_us = 0;
+      }
+
+      dvs_msgs::Event ev;
+      ev.x = x;
+      ev.y = y;
+      ev.ts.fromNSec(static_cast<uint64_t>(t_us) * 1000ull);
+      ev.polarity = pol;
+      events->push_back(ev);
+      data += 4;
+    }
+
+    if (stamp_ns_out)
+    {
+      *stamp_ns_out = events->back().ts.toNSec();
+    }
+    if (events_out)
+    {
+      *events_out = std::move(events);
+    }
+    if (debug_out)
+    {
+      debug_out->count = count;
+      debug_out->total_dt = static_cast<uint64_t>(span_us);
+      debug_out->base_us = t_start_us;
+      debug_out->end_us = t_end_us;
+    }
+    return true;
   }
 
   const size_t count = pkt.raw_bytes.size() / 6;
@@ -263,7 +525,11 @@ bool decode_events(const Rt1060Packet& pkt, EventArrayPtr* events_out, int64_t* 
     data += 6;
   }
 
-  int64_t base_us = static_cast<int64_t>(pkt.ts_us) - static_cast<int64_t>(total_dt);
+  int64_t base_us = static_cast<int64_t>(pkt.ts_us);
+  if (cfg.ts_anchor == Rt1060TsAnchor::End)
+  {
+    base_us -= static_cast<int64_t>(total_dt);
+  }
   if (base_us < 0)
   {
     base_us = 0;
@@ -304,6 +570,13 @@ bool decode_events(const Rt1060Packet& pkt, EventArrayPtr* events_out, int64_t* 
   {
     *events_out = std::move(events);
   }
+  if (debug_out)
+  {
+    debug_out->count = count;
+    debug_out->total_dt = total_dt;
+    debug_out->base_us = base_us;
+    debug_out->end_us = t_us;
+  }
   return true;
 }
 
@@ -314,7 +587,8 @@ bool decode_keypoints(const Rt1060Packet& pkt, elis_link::KeypointPacket* packet
   {
     return false;
   }
-  const size_t stride = static_cast<size_t>(8 + pkt.kp_desc_len);
+  const size_t base = pkt.kp_has_id ? 10u : 8u;
+  const size_t stride = base + static_cast<size_t>(pkt.kp_desc_len);
   if (stride == 0 || (pkt.kp_bytes.size() % stride) != 0)
   {
     return false;
@@ -331,22 +605,40 @@ bool decode_keypoints(const Rt1060Packet& pkt, elis_link::KeypointPacket* packet
     packet.descriptors.reserve(count * pkt.kp_desc_len);
   }
 
+  if (!pkt.kp_has_id)
+  {
+    static int warned_no_id = 0;
+    if (warned_no_id++ < 3)
+    {
+      LOG(WARNING) << "[RT1060] Firmware keypoints missing KP_ID flag; "
+                   << "using per-slice indices as track IDs.";
+    }
+  }
+
   const uint8_t* data = pkt.kp_bytes.data();
   for (size_t i = 0; i < count; ++i)
   {
     const uint16_t x = read_le_u16(data);
     const uint16_t y = read_le_u16(data + 2);
     const uint16_t score = read_le_u16(data + 4);
-    const uint16_t track_id = read_le_u16(data + 6);
+    const uint16_t angle = read_le_u16(data + 6);
+    (void)angle;
+    int32_t track_id = static_cast<int32_t>(i);
+    size_t desc_offset = 8;
+    if (pkt.kp_has_id)
+    {
+      track_id = static_cast<int32_t>(read_le_u16(data + 8));
+      desc_offset = 10;
+    }
 
     packet.x_px.push_back(static_cast<float>(x));
     packet.y_px.push_back(static_cast<float>(y));
     packet.strength.push_back(static_cast<float>(score));
-    packet.track_ids.push_back(static_cast<int32_t>(track_id));
+    packet.track_ids.push_back(track_id);
 
     if (pkt.kp_desc_len > 0)
     {
-      const uint8_t* desc = data + 8;
+      const uint8_t* desc = data + desc_offset;
       packet.descriptors.insert(packet.descriptors.end(), desc, desc + pkt.kp_desc_len);
     }
 
@@ -380,13 +672,33 @@ DataProviderRt1060::DataProviderRt1060(const std::string& port,
                                        int baud,
                                        bool use_firmware_keypoints,
                                        bool drop_empty_raw,
-                                       int queue_size)
+                                       int queue_size,
+                                       bool allow_xy_only_synth,
+                                       int xy_only_window_us,
+                                       int xy_only_polarity,
+                                       Rt1060TsAnchor ts_anchor,
+                                       int log_stats_interval_s,
+                                       bool debug_packets,
+                                       int debug_every_n_packets,
+                                       const std::string& debug_log_path,
+                                       int debug_log_max_lines,
+                                       int debug_log_flush_every)
   : DataProviderBase(DataProviderType::Rt1060)
   , port_(port)
   , baud_(baud)
   , use_firmware_keypoints_(use_firmware_keypoints)
   , drop_empty_raw_(drop_empty_raw)
   , queue_size_(std::max(1, queue_size))
+  , allow_xy_only_synth_(allow_xy_only_synth)
+  , xy_only_window_us_(std::max(0, xy_only_window_us))
+  , xy_only_polarity_(xy_only_polarity != 0)
+  , ts_anchor_(ts_anchor)
+  , log_stats_interval_s_(std::max(0, log_stats_interval_s))
+  , debug_packets_(debug_packets)
+  , debug_every_n_packets_(std::max(1, debug_every_n_packets))
+  , debug_log_path_(debug_log_path)
+  , debug_log_max_lines_(debug_log_max_lines)
+  , debug_log_flush_every_(std::max(1, debug_log_flush_every))
 {
   reader_thread_ = std::thread(&DataProviderRt1060::readerLoop, this);
 }
@@ -417,9 +729,15 @@ void DataProviderRt1060::enqueueSlice(SliceData slice)
 {
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
+    int dropped = 0;
     while (static_cast<int>(queue_.size()) >= queue_size_)
     {
       queue_.pop_front();
+      ++dropped;
+    }
+    if (dropped > 0)
+    {
+      queue_drops_.fetch_add(static_cast<uint64_t>(dropped), std::memory_order_relaxed);
     }
     queue_.push_back(std::move(slice));
     pending_.store(static_cast<int>(queue_.size()));
@@ -470,52 +788,293 @@ void DataProviderRt1060::readerLoop()
     SerialPort port(port_, baud_, running_);
     LOG(INFO) << "[RT1060] DataProvider listening on " << port_;
 
+    Rt1060DecodeConfig decode_cfg;
+    decode_cfg.allow_xy_only_synth = allow_xy_only_synth_;
+    decode_cfg.xy_only_window_us = xy_only_window_us_;
+    decode_cfg.xy_only_polarity = xy_only_polarity_;
+    decode_cfg.ts_anchor = ts_anchor_;
+
+    Rt1060Stats stats;
+    std::vector<uint8_t> buffer;
+    buffer.reserve(8192);
+    std::vector<uint8_t> scratch(4096);
+
+    auto last_log = std::chrono::steady_clock::now();
+    uint64_t last_packets = 0;
+    uint64_t last_events = 0;
+    uint64_t last_bytes = 0;
+    uint64_t debug_packets = 0;
+    int64_t last_stamp_ns = -1;
+    uint64_t debug_log_packets = 0;
+
+    std::ofstream debug_log;
+    bool debug_log_active = false;
+    int debug_log_lines = 0;
+    int debug_log_since_flush = 0;
+    const int debug_log_flush_every = std::max(1, debug_log_flush_every_);
+    const int debug_log_max_lines = debug_log_max_lines_;
+
+    if (!debug_log_path_.empty())
+    {
+      debug_log.open(debug_log_path_.c_str(), std::ios::out | std::ios::trunc);
+      if (!debug_log.is_open())
+      {
+        LOG(WARNING) << "[RT1060] Failed to open debug log at " << debug_log_path_;
+      }
+      else
+      {
+        debug_log_active = true;
+        debug_log << "tag,seq,ts_us,flags,raw_xy_only,n_raw,raw_stride,raw_count_calc,"
+                     "n_kp,kp_desc_len,kp_has_id,imu_ts,imu_ts_us,raw_bytes,events,"
+                     "base_us,end_us,total_dt,stamp_ns,checksum_failures,resyncs,queue_drops,"
+                     "non_monotonic,status\n";
+        LOG(INFO) << "[RT1060] Debug log enabled: " << debug_log_path_;
+      }
+    }
+
+    auto write_debug_line = [&](const char* tag,
+                                const Rt1060Packet& pkt,
+                                const Rt1060EventDebug& info,
+                                int64_t stamp_ns,
+                                bool non_monotonic,
+                                const char* status) {
+      if (!debug_log_active)
+      {
+        return;
+      }
+      if (debug_log_max_lines > 0 && debug_log_lines >= debug_log_max_lines)
+      {
+        debug_log_active = false;
+        LOG(WARNING) << "[RT1060] Debug log max lines reached; disabling file output.";
+        return;
+      }
+
+      const size_t raw_stride = pkt.raw_xy_only ? 4u : 6u;
+      const size_t raw_count_calc = (raw_stride > 0u)
+        ? (pkt.raw_bytes.size() / raw_stride)
+        : 0u;
+
+      debug_log << tag << ','
+                << pkt.seq << ','
+                << pkt.ts_us << ",0x"
+                << std::hex << static_cast<int>(pkt.flags) << std::dec << ','
+                << static_cast<int>(pkt.raw_xy_only) << ','
+                << pkt.n_raw << ','
+                << raw_stride << ','
+                << raw_count_calc << ','
+                << pkt.n_kp << ','
+                << static_cast<int>(pkt.kp_desc_len) << ','
+                << static_cast<int>(pkt.kp_has_id) << ','
+                << static_cast<int>(pkt.has_imu_ts) << ','
+                << pkt.imu_ts_us << ','
+                << pkt.raw_bytes.size() << ','
+                << info.count << ','
+                << info.base_us << ','
+                << info.end_us << ','
+                << info.total_dt << ','
+                << stamp_ns << ','
+                << stats.checksum_failures << ','
+                << stats.resyncs << ','
+                << queue_drops_.load(std::memory_order_relaxed) << ','
+                << static_cast<int>(non_monotonic) << ','
+                << status << '\n';
+
+      ++debug_log_lines;
+      ++debug_log_since_flush;
+      if (debug_log_since_flush >= debug_log_flush_every)
+      {
+        debug_log.flush();
+        debug_log_since_flush = 0;
+      }
+    };
+
     while (running_)
     {
-      Rt1060Packet pkt;
-      if (!read_packet(port, &pkt, running_))
+      const ssize_t n = port.read_some(scratch.data(), scratch.size());
+      if (n < 0)
       {
-        if (!running_)
+        LOG(ERROR) << "[RT1060] Serial read failed.";
+        break;
+      }
+      if (n > 0)
+      {
+        buffer.insert(buffer.end(), scratch.begin(), scratch.begin() + n);
+        stats.bytes_received += static_cast<uint64_t>(n);
+      }
+      else
+      {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+
+      while (running_)
+      {
+        Rt1060Packet pkt;
+        const ParseResult res = try_parse_packet(buffer, &pkt, &stats);
+        if (res == ParseResult::Parsed)
         {
-          break;
-        }
-        continue;
-      }
+          stats.packets_parsed++;
+          if (debug_log_active)
+          {
+            ++debug_log_packets;
+          }
+          if (drop_empty_raw_ && !(pkt.flags & kFlagHasRaw))
+          {
+            if (debug_log_active)
+            {
+              Rt1060EventDebug drop_info;
+              drop_info.count = 0;
+              drop_info.total_dt = 0;
+              drop_info.base_us = static_cast<int64_t>(pkt.ts_us);
+              drop_info.end_us = static_cast<int64_t>(pkt.ts_us);
+              drop_info.xy_only = pkt.raw_xy_only;
+              write_debug_line("drop", pkt, drop_info, -1, false, "drop_no_raw_flag");
+            }
+            continue;
+          }
 
-      if (drop_empty_raw_ && !(pkt.flags & kFlagHasRaw))
-      {
-        continue;
-      }
+          EventArrayPtr events;
+          int64_t stamp_ns = -1;
+          Rt1060EventDebug debug_info;
+          const bool debug_enabled = debug_packets_;
+          const bool want_debug_info = debug_enabled || debug_log_active;
+          const bool decoded = decode_events(
+            pkt,
+            decode_cfg,
+            &events,
+            &stamp_ns,
+            want_debug_info ? &debug_info : nullptr);
+          if (!decoded)
+          {
+            if (debug_log_active)
+            {
+              const char* reason = "drop_decode";
+              if (pkt.raw_xy_only && !allow_xy_only_synth_)
+              {
+                reason = "drop_xy_only";
+              }
+              else if (pkt.raw_bytes.empty())
+              {
+                reason = "drop_empty_raw_bytes";
+              }
+              write_debug_line("drop", pkt, debug_info, -1, false, reason);
+            }
+            continue;
+          }
+          if (!events || events->empty())
+          {
+            if (debug_log_active)
+            {
+              write_debug_line("drop", pkt, debug_info, stamp_ns, false, "drop_empty_events");
+            }
+            continue;
+          }
+          stats.events_emitted += static_cast<uint64_t>(events->size());
 
-      EventArrayPtr events;
-      int64_t stamp_ns = 0;
-      if (!decode_events(pkt, &events, &stamp_ns))
-      {
-        continue;
-      }
-      if (!events || events->empty())
-      {
-        continue;
-      }
+          SliceData slice;
+          slice.events = std::move(events);
+          // Match frontend cached-packet lookup key: events.back().ts.toNSec().
+          slice.stamp_ns = stamp_ns;
 
-      SliceData slice;
-      slice.events = std::move(events);
-      slice.stamp_ns = stamp_ns;
+          const bool non_monotonic = (last_stamp_ns >= 0 && stamp_ns <= last_stamp_ns);
+          if (debug_enabled && non_monotonic)
+          {
+            LOG(WARNING) << "[RT1060][debug] Non-monotonic slice stamp: prev_ns="
+                         << last_stamp_ns << " curr_ns=" << stamp_ns
+                         << " seq=" << pkt.seq << " ts_us=" << pkt.ts_us
+                         << " n_raw=" << pkt.n_raw
+                         << " raw_xy_only=" << pkt.raw_xy_only
+                         << " base_us=" << debug_info.base_us
+                         << " end_us=" << debug_info.end_us
+                         << " total_dt=" << debug_info.total_dt;
+          }
+
+          if (debug_log_active && non_monotonic)
+          {
+            write_debug_line("non_monotonic", pkt, debug_info, stamp_ns, true, "non_monotonic");
+          }
+
+          if (debug_log_active &&
+              (debug_log_packets % static_cast<uint64_t>(debug_every_n_packets_) == 0))
+          {
+            write_debug_line("packet", pkt, debug_info, stamp_ns, non_monotonic, "ok");
+          }
+
+          if (debug_enabled)
+          {
+            ++debug_packets;
+            if (debug_packets % static_cast<uint64_t>(debug_every_n_packets_) == 0)
+            {
+              LOG(INFO) << "[RT1060][debug] seq=" << pkt.seq
+                        << " ts_us=" << pkt.ts_us
+                        << " flags=0x" << std::hex << static_cast<int>(pkt.flags) << std::dec
+                        << " raw_xy_only=" << pkt.raw_xy_only
+                        << " n_raw=" << pkt.n_raw
+                        << " n_kp=" << pkt.n_kp
+                        << " kp_desc_len=" << static_cast<int>(pkt.kp_desc_len)
+                        << " kp_has_id=" << pkt.kp_has_id
+                        << " imu_ts=" << pkt.has_imu_ts
+                        << " imu_ts_us=" << pkt.imu_ts_us
+                        << " raw_bytes=" << pkt.raw_bytes.size()
+                        << " events=" << debug_info.count
+                        << " base_us=" << debug_info.base_us
+                        << " end_us=" << debug_info.end_us
+                        << " total_dt=" << debug_info.total_dt
+                        << " stamp_ns=" << stamp_ns;
+            }
+          }
 
 #ifdef ELIS_LINK_ENABLED
-      if (use_firmware_keypoints_)
-      {
-        slice.has_packet = decode_keypoints(pkt, &slice.packet);
-      }
+          if (use_firmware_keypoints_)
+          {
+            slice.has_packet = decode_keypoints(pkt, &slice.packet);
+          }
 #else
-      if (use_firmware_keypoints_ && !warned_missing_elis)
-      {
-        warned_missing_elis = true;
-        LOG(WARNING) << "[RT1060] Firmware keypoints requested but ELIS_LINK_ENABLED is not set; ignoring.";
-      }
+          if (use_firmware_keypoints_ && !warned_missing_elis)
+          {
+            warned_missing_elis = true;
+            LOG(WARNING) << "[RT1060] Firmware keypoints requested but ELIS_LINK_ENABLED is not set; ignoring.";
+          }
 #endif
 
-      enqueueSlice(std::move(slice));
+          last_stamp_ns = stamp_ns;
+          enqueueSlice(std::move(slice));
+          continue;
+        }
+        if (res == ParseResult::Resync)
+        {
+          continue;
+        }
+        break;
+      }
+
+      if (log_stats_interval_s_ > 0)
+      {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - last_log).count();
+        if (elapsed >= static_cast<double>(log_stats_interval_s_))
+        {
+          const uint64_t curr_queue_drops = queue_drops_.load(std::memory_order_relaxed);
+          const uint64_t packets = stats.packets_parsed - last_packets;
+          const uint64_t events = stats.events_emitted - last_events;
+          const uint64_t bytes = stats.bytes_received - last_bytes;
+          const double packets_rate = packets / elapsed;
+          const double events_rate = events / elapsed;
+          const double bytes_rate = bytes / elapsed;
+
+          LOG(INFO) << std::fixed << std::setprecision(1)
+                    << "[RT1060] stats packets/s=" << packets_rate
+                    << " events/s=" << events_rate
+                    << " bytes/s=" << bytes_rate
+                    << " checksum_failures=" << stats.checksum_failures
+                    << " resyncs=" << stats.resyncs
+                    << " queue_drops=" << curr_queue_drops;
+
+          last_log = now;
+          last_packets = stats.packets_parsed;
+          last_events = stats.events_emitted;
+          last_bytes = stats.bytes_received;
+        }
+      }
     }
   }
   catch (const std::exception& e)

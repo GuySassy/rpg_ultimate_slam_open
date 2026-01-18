@@ -33,6 +33,9 @@
 #include <ze/data_provider/data_provider_rostopic.hpp>
 #include <ze/data_provider/data_provider_rt1060.hpp>
 
+#include <algorithm>
+#include <cctype>
+
 DEFINE_string(bag_filename, "dataset.bag", "Name of bagfile in data_dir.");
 
 DEFINE_string(topic_cam0, "/cam0/image_raw", "");
@@ -79,6 +82,48 @@ DEFINE_int32(rt1060_queue_size, 2,
              "RT1060 provider queue size for decoded slices.");
 DEFINE_bool(rt1060_drop_empty_raw, true,
             "RT1060 provider drops packets with no raw events.");
+DEFINE_string(rt1060_ts_anchor, "end",
+              "RT1060 timestamp anchor for compact raw: start or end.");
+DEFINE_bool(rt1060_allow_xy_only_synth, false,
+            "Allow RAW_XY_ONLY packets to synthesize events (test mode).");
+DEFINE_int32(rt1060_xy_only_window_us, 3000,
+             "Synthetic window (us) for RAW_XY_ONLY event timestamps.");
+DEFINE_int32(rt1060_xy_only_polarity, 1,
+             "Synthetic polarity for RAW_XY_ONLY events (0 or 1).");
+DEFINE_int32(rt1060_log_stats_interval_s, 5,
+             "Seconds between RT1060 parser stats logs (0 disables).");
+DEFINE_bool(rt1060_debug_packets, false,
+            "Log RT1060 packet debug details (throttled).");
+DEFINE_int32(rt1060_debug_every_n_packets, 200,
+             "Log one RT1060 packet every N parsed when debug is enabled.");
+DEFINE_string(rt1060_debug_log_path, "",
+              "Write RT1060 debug CSV to this path (empty disables).");
+DEFINE_int32(rt1060_debug_log_max_lines, 2000,
+             "Max RT1060 debug log lines (<=0 for unlimited).");
+DEFINE_int32(rt1060_debug_log_flush_every, 20,
+             "Flush RT1060 debug log every N lines.");
+
+namespace {
+
+ze::Rt1060TsAnchor parseRt1060TsAnchor(const std::string& value)
+{
+  std::string lowered = value;
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (lowered == "start")
+  {
+    return ze::Rt1060TsAnchor::Start;
+  }
+  if (lowered == "end")
+  {
+    return ze::Rt1060TsAnchor::End;
+  }
+  LOG(WARNING) << "Unknown --rt1060_ts_anchor=" << value
+               << " (expected start|end); defaulting to end.";
+  return ze::Rt1060TsAnchor::End;
+}
+
+}  // namespace
 
 namespace ze {
 
@@ -176,7 +221,17 @@ DataProviderBase::Ptr loadDataProviderFromGflags(const uint32_t num_cams)
         FLAGS_rt1060_baud,
         use_firmware,
         FLAGS_rt1060_drop_empty_raw,
-        FLAGS_rt1060_queue_size));
+        FLAGS_rt1060_queue_size,
+        FLAGS_rt1060_allow_xy_only_synth,
+        FLAGS_rt1060_xy_only_window_us,
+        FLAGS_rt1060_xy_only_polarity,
+        parseRt1060TsAnchor(FLAGS_rt1060_ts_anchor),
+        FLAGS_rt1060_log_stats_interval_s,
+        FLAGS_rt1060_debug_packets,
+        FLAGS_rt1060_debug_every_n_packets,
+        FLAGS_rt1060_debug_log_path,
+        FLAGS_rt1060_debug_log_max_lines,
+        FLAGS_rt1060_debug_log_flush_every));
       break;
     }
     default:
