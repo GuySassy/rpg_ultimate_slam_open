@@ -84,6 +84,8 @@ DEFINE_bool(rt1060_drop_empty_raw, true,
             "RT1060 provider drops packets with no raw events.");
 DEFINE_string(rt1060_ts_anchor, "end",
               "RT1060 timestamp anchor for compact raw: start or end.");
+DEFINE_string(rt1060_raw_format, "compact",
+              "RT1060 raw format override: auto|compact|full.");
 DEFINE_bool(rt1060_allow_xy_only_synth, false,
             "Allow RAW_XY_ONLY packets to synthesize events (test mode).");
 DEFINE_int32(rt1060_xy_only_window_us, 3000,
@@ -121,6 +123,28 @@ ze::Rt1060TsAnchor parseRt1060TsAnchor(const std::string& value)
   LOG(WARNING) << "Unknown --rt1060_ts_anchor=" << value
                << " (expected start|end); defaulting to end.";
   return ze::Rt1060TsAnchor::End;
+}
+
+ze::Rt1060RawFormat parseRt1060RawFormat(const std::string& value)
+{
+  std::string lowered = value;
+  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (lowered == "auto")
+  {
+    return ze::Rt1060RawFormat::Auto;
+  }
+  if (lowered == "full" || lowered == "1")
+  {
+    return ze::Rt1060RawFormat::Full;
+  }
+  if (lowered == "compact" || lowered == "0")
+  {
+    return ze::Rt1060RawFormat::Compact;
+  }
+  LOG(WARNING) << "Unknown --rt1060_raw_format=" << value
+               << " (expected auto|compact|full); defaulting to compact.";
+  return ze::Rt1060RawFormat::Compact;
 }
 
 }  // namespace
@@ -226,6 +250,7 @@ DataProviderBase::Ptr loadDataProviderFromGflags(const uint32_t num_cams)
         FLAGS_rt1060_xy_only_window_us,
         FLAGS_rt1060_xy_only_polarity,
         parseRt1060TsAnchor(FLAGS_rt1060_ts_anchor),
+        parseRt1060RawFormat(FLAGS_rt1060_raw_format),
         FLAGS_rt1060_log_stats_interval_s,
         FLAGS_rt1060_debug_packets,
         FLAGS_rt1060_debug_every_n_packets,

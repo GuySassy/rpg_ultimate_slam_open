@@ -4,6 +4,7 @@
 // Modified: Robotics and Perception Group
 
 #include <ze/data_provider/data_provider_rt1060.hpp>
+#include <ze/data_provider/rt1060_parser.hpp>
 
 #include <ze/common/logging.hpp>
 
@@ -27,6 +28,9 @@
 #include <unistd.h>
 
 namespace ze {
+constexpr uint8_t kRawFmtCompact = 0;
+constexpr uint8_t kRawFmtFull = 1;
+
 namespace {
 
 constexpr uint8_t kMagicBytes[2] = {0xCD, 0xAB};
@@ -43,7 +47,7 @@ constexpr size_t kTailSize = 2;
 constexpr size_t kMaxKeypoints = 512;
 constexpr size_t kMaxRawEvents = 16384;
 constexpr size_t kMaxDescLen = 128;
-constexpr size_t kMaxPacketBytes = 128 * 1024;
+constexpr size_t kMaxPacketBytes = 256 * 1024;
 
 uint16_t read_le_u16(const uint8_t* data)
 {
@@ -72,56 +76,6 @@ speed_t to_speed(int baud)
   }
 }
 
-struct Rt1060Packet
-{
-  uint8_t version = 0;
-  uint8_t flags = 0;
-  uint16_t seq = 0;
-  uint32_t ts_us = 0;
-  uint16_t n_raw = 0;
-  uint16_t n_kp = 0;
-  uint8_t kp_desc_len = 0;
-  bool raw_xy_only = false;
-  bool kp_has_id = false;
-  bool has_imu_ts = false;
-  uint32_t imu_ts_us = 0;
-  std::vector<uint8_t> kp_bytes;
-  std::vector<uint8_t> raw_bytes;
-};
-
-struct Rt1060DecodeConfig
-{
-  bool allow_xy_only_synth = false;
-  int xy_only_window_us = 3000;
-  bool xy_only_polarity = true;
-  Rt1060TsAnchor ts_anchor = Rt1060TsAnchor::End;
-};
-
-struct Rt1060Stats
-{
-  uint64_t packets_parsed = 0;
-  uint64_t checksum_failures = 0;
-  uint64_t resyncs = 0;
-  uint64_t bytes_received = 0;
-  uint64_t queue_drops = 0;
-  uint64_t events_emitted = 0;
-};
-
-struct Rt1060EventDebug
-{
-  size_t count = 0;
-  uint64_t total_dt = 0;
-  int64_t base_us = -1;
-  int64_t end_us = -1;
-  bool xy_only = false;
-};
-
-enum class ParseResult
-{
-  NeedMore,
-  Parsed,
-  Resync
-};
 
 uint8_t xor_checksum(const uint8_t* data, size_t len)
 {
@@ -238,13 +192,14 @@ private:
   int fd_ = -1;
 };
 
-ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
-                             Rt1060Packet* out,
-                             Rt1060Stats* stats)
+Rt1060ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
+                                   Rt1060Packet* out,
+                                   Rt1060Stats* stats,
+                                   const Rt1060ParseConfig& cfg)
 {
   if (buffer.size() < kMagicSize)
   {
-    return ParseResult::NeedMore;
+    return Rt1060ParseResult::NeedMore;
   }
 
   auto it = std::search(buffer.begin(), buffer.end(),
@@ -262,7 +217,7 @@ ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
         buffer.clear();
       }
     }
-    return ParseResult::NeedMore;
+    return Rt1060ParseResult::NeedMore;
   }
 
   if (it != buffer.begin())
@@ -276,7 +231,7 @@ ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
 
   if (buffer.size() < (kMagicSize + kHeaderSize))
   {
-    return ParseResult::NeedMore;
+    return Rt1060ParseResult::NeedMore;
   }
 
   const uint8_t* hdr = buffer.data() + kMagicSize;
@@ -287,6 +242,8 @@ ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
   const uint16_t n_raw = read_le_u16(hdr + 8);
   const uint16_t n_kp = read_le_u16(hdr + 10);
   const uint8_t kp_desc_len = hdr[12];
+  uint8_t raw_format = hdr[13];
+  raw_format = rt1060NormalizeRawFormat(raw_format, cfg.raw_format);
 
   const bool has_raw = (flags & kFlagHasRaw) != 0;
   const bool has_kp = (flags & kFlagHasKp) != 0;
@@ -303,12 +260,12 @@ ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
     {
       stats->resyncs++;
     }
-    return ParseResult::Resync;
+    return Rt1060ParseResult::Resync;
   }
 
   const size_t kp_stride = has_kp ? (static_cast<size_t>(kp_has_id ? 10 : 8) + kp_desc_len) : 0u;
   const size_t kp_bytes = has_kp ? (static_cast<size_t>(n_kp) * kp_stride) : 0u;
-  const size_t raw_stride = raw_xy_only ? 4u : 6u;
+  const size_t raw_stride = rt1060RawStride(raw_xy_only, raw_format);
   const size_t raw_bytes = has_raw ? (static_cast<size_t>(n_raw) * raw_stride) : 0u;
   size_t payload_len = kp_bytes + raw_bytes;
   if (has_accel)
@@ -332,12 +289,12 @@ ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
     {
       stats->resyncs++;
     }
-    return ParseResult::Resync;
+    return Rt1060ParseResult::Resync;
   }
 
   if (buffer.size() < packet_len)
   {
-    return ParseResult::NeedMore;
+    return Rt1060ParseResult::NeedMore;
   }
 
   const size_t checksum_offset = kMagicSize + kHeaderSize + payload_len;
@@ -352,7 +309,7 @@ ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
       stats->resyncs++;
     }
     buffer.erase(buffer.begin());
-    return ParseResult::Resync;
+    return Rt1060ParseResult::Resync;
   }
 
   Rt1060Packet pkt;
@@ -363,6 +320,7 @@ ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
   pkt.n_raw = n_raw;
   pkt.n_kp = n_kp;
   pkt.kp_desc_len = kp_desc_len;
+  pkt.raw_format = raw_format;
   pkt.raw_xy_only = raw_xy_only;
   pkt.kp_has_id = kp_has_id;
   pkt.has_imu_ts = has_imu_ts;
@@ -405,7 +363,7 @@ ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
   {
     *out = std::move(pkt);
   }
-  return ParseResult::Parsed;
+  return Rt1060ParseResult::Parsed;
 }
 
 bool decode_events(const Rt1060Packet& pkt,
@@ -514,47 +472,112 @@ bool decode_events(const Rt1060Packet& pkt,
     return true;
   }
 
-  const size_t count = pkt.raw_bytes.size() / 6;
+  const size_t raw_stride = rt1060RawStride(pkt.raw_xy_only, pkt.raw_format);
+  if (raw_stride == 0)
+  {
+    return false;
+  }
+  const size_t count = pkt.raw_bytes.size() / raw_stride;
   const uint8_t* data = pkt.raw_bytes.data();
-
-  uint64_t total_dt = 0;
-  for (size_t i = 0; i < count; ++i)
-  {
-    const uint16_t pol_dt = read_le_u16(data + 4);
-    total_dt += static_cast<uint64_t>(pol_dt & 0x7FFF);
-    data += 6;
-  }
-
-  int64_t base_us = static_cast<int64_t>(pkt.ts_us);
-  if (cfg.ts_anchor == Rt1060TsAnchor::End)
-  {
-    base_us -= static_cast<int64_t>(total_dt);
-  }
-  if (base_us < 0)
-  {
-    base_us = 0;
-  }
 
   auto events = std::make_shared<EventArray>();
   events->reserve(count);
 
-  int64_t t_us = base_us;
-  data = pkt.raw_bytes.data();
-  for (size_t i = 0; i < count; ++i)
+  if (pkt.raw_format == kRawFmtFull)
   {
-    const uint16_t x = read_le_u16(data);
-    const uint16_t y = read_le_u16(data + 2);
-    const uint16_t pol_dt = read_le_u16(data + 4);
-    const uint16_t dt = static_cast<uint16_t>(pol_dt & 0x7FFF);
-    t_us += static_cast<int64_t>(dt);
+    constexpr int64_t kTickHz = 24000000;
+    constexpr int64_t kNsPerSec = 1000000000;
+    int64_t total_dt_ns = 0;
+    for (size_t i = 0; i < count; ++i)
+    {
+      const uint16_t dt_ticks = read_le_u16(data + 4);
+      const int64_t dt_ns = (static_cast<int64_t>(dt_ticks) * kNsPerSec + kTickHz / 2) / kTickHz;
+      total_dt_ns += dt_ns;
+      data += raw_stride;
+    }
 
-    dvs_msgs::Event ev;
-    ev.x = x;
-    ev.y = y;
-    ev.ts.fromNSec(static_cast<uint64_t>(t_us) * 1000ull);
-    ev.polarity = static_cast<bool>((pol_dt >> 15) & 0x1);
-    events->push_back(ev);
-    data += 6;
+    int64_t base_ns = static_cast<int64_t>(pkt.ts_us) * 1000;
+    if (cfg.ts_anchor == Rt1060TsAnchor::End)
+    {
+      base_ns -= total_dt_ns;
+    }
+    if (base_ns < 0)
+    {
+      base_ns = 0;
+    }
+
+    int64_t t_ns = base_ns;
+    data = pkt.raw_bytes.data();
+    for (size_t i = 0; i < count; ++i)
+    {
+      const uint16_t raw_word = read_le_u16(data);
+      const uint16_t dt_ticks = read_le_u16(data + 4);
+      const int64_t dt_ns = (static_cast<int64_t>(dt_ticks) * kNsPerSec + kTickHz / 2) / kTickHz;
+      t_ns += dt_ns;
+
+      dvs_msgs::Event ev;
+      ev.polarity = static_cast<bool>(raw_word & 0x1);
+      ev.x = read_le_u16(data + 8);
+      ev.y = read_le_u16(data + 10);
+      ev.ts.fromNSec(static_cast<uint64_t>(t_ns));
+      events->push_back(ev);
+      data += raw_stride;
+    }
+
+    if (debug_out)
+    {
+      debug_out->count = count;
+      debug_out->total_dt = static_cast<uint64_t>((total_dt_ns + 500) / 1000);
+      debug_out->base_us = base_ns / 1000;
+      debug_out->end_us = t_ns / 1000;
+    }
+  }
+  else
+  {
+    uint64_t total_dt = 0;
+    for (size_t i = 0; i < count; ++i)
+    {
+      const uint16_t pol_dt = read_le_u16(data + 4);
+      total_dt += static_cast<uint64_t>(pol_dt & 0x7FFF);
+      data += raw_stride;
+    }
+
+    int64_t base_us = static_cast<int64_t>(pkt.ts_us);
+    if (cfg.ts_anchor == Rt1060TsAnchor::End)
+    {
+      base_us -= static_cast<int64_t>(total_dt);
+    }
+    if (base_us < 0)
+    {
+      base_us = 0;
+    }
+
+    int64_t t_us = base_us;
+    data = pkt.raw_bytes.data();
+    for (size_t i = 0; i < count; ++i)
+    {
+      const uint16_t x = read_le_u16(data);
+      const uint16_t y = read_le_u16(data + 2);
+      const uint16_t pol_dt = read_le_u16(data + 4);
+      const uint16_t dt = static_cast<uint16_t>(pol_dt & 0x7FFF);
+      t_us += static_cast<int64_t>(dt);
+
+      dvs_msgs::Event ev;
+      ev.x = x;
+      ev.y = y;
+      ev.ts.fromNSec(static_cast<uint64_t>(t_us) * 1000ull);
+      ev.polarity = static_cast<bool>((pol_dt >> 15) & 0x1);
+      events->push_back(ev);
+      data += raw_stride;
+    }
+
+    if (debug_out)
+    {
+      debug_out->count = count;
+      debug_out->total_dt = total_dt;
+      debug_out->base_us = base_us;
+      debug_out->end_us = t_us;
+    }
   }
 
   if (events->empty())
@@ -569,13 +592,6 @@ bool decode_events(const Rt1060Packet& pkt,
   if (events_out)
   {
     *events_out = std::move(events);
-  }
-  if (debug_out)
-  {
-    debug_out->count = count;
-    debug_out->total_dt = total_dt;
-    debug_out->base_us = base_us;
-    debug_out->end_us = t_us;
   }
   return true;
 }
@@ -658,6 +674,66 @@ bool decode_keypoints(const Rt1060Packet& pkt, elis_link::KeypointPacket* packet
 
 } // namespace
 
+uint8_t rt1060NormalizeRawFormat(uint8_t raw_format, Rt1060RawFormat override)
+{
+  switch (override)
+  {
+  case Rt1060RawFormat::Auto:
+    break;
+  case Rt1060RawFormat::Compact:
+    return kRawFmtCompact;
+  case Rt1060RawFormat::Full:
+    return kRawFmtFull;
+  default:
+    break;
+  }
+
+  if (raw_format == kRawFmtFull)
+  {
+    return kRawFmtFull;
+  }
+  if (raw_format != kRawFmtCompact)
+  {
+    static int warned_unknown = 0;
+    if (warned_unknown++ < 3)
+    {
+      LOG(WARNING) << "[RT1060] Unknown raw_format=" << static_cast<int>(raw_format)
+                   << "; defaulting to compact.";
+    }
+  }
+  return kRawFmtCompact;
+}
+
+size_t rt1060RawStride(bool raw_xy_only, uint8_t raw_format)
+{
+  if (raw_xy_only)
+  {
+    return 4u;
+  }
+  if (raw_format == kRawFmtFull)
+  {
+    return 12u;
+  }
+  return 6u;
+}
+
+Rt1060ParseResult rt1060TryParsePacket(std::vector<uint8_t>& buffer,
+                                       Rt1060Packet* out,
+                                       Rt1060Stats* stats,
+                                       const Rt1060ParseConfig& cfg)
+{
+  return try_parse_packet(buffer, out, stats, cfg);
+}
+
+bool rt1060DecodeEvents(const Rt1060Packet& pkt,
+                        const Rt1060DecodeConfig& cfg,
+                        EventArrayPtr* events_out,
+                        int64_t* stamp_ns_out,
+                        Rt1060EventDebug* debug_out)
+{
+  return decode_events(pkt, cfg, events_out, stamp_ns_out, debug_out);
+}
+
 struct DataProviderRt1060::SliceData
 {
   EventArrayPtr events;
@@ -677,6 +753,7 @@ DataProviderRt1060::DataProviderRt1060(const std::string& port,
                                        int xy_only_window_us,
                                        int xy_only_polarity,
                                        Rt1060TsAnchor ts_anchor,
+                                       Rt1060RawFormat raw_format,
                                        int log_stats_interval_s,
                                        bool debug_packets,
                                        int debug_every_n_packets,
@@ -693,6 +770,7 @@ DataProviderRt1060::DataProviderRt1060(const std::string& port,
   , xy_only_window_us_(std::max(0, xy_only_window_us))
   , xy_only_polarity_(xy_only_polarity != 0)
   , ts_anchor_(ts_anchor)
+  , raw_format_(raw_format)
   , log_stats_interval_s_(std::max(0, log_stats_interval_s))
   , debug_packets_(debug_packets)
   , debug_every_n_packets_(std::max(1, debug_every_n_packets))
@@ -794,6 +872,9 @@ void DataProviderRt1060::readerLoop()
     decode_cfg.xy_only_polarity = xy_only_polarity_;
     decode_cfg.ts_anchor = ts_anchor_;
 
+    Rt1060ParseConfig parse_cfg;
+    parse_cfg.raw_format = raw_format_;
+
     Rt1060Stats stats;
     std::vector<uint8_t> buffer;
     buffer.reserve(8192);
@@ -824,7 +905,7 @@ void DataProviderRt1060::readerLoop()
       else
       {
         debug_log_active = true;
-        debug_log << "tag,seq,ts_us,flags,raw_xy_only,n_raw,raw_stride,raw_count_calc,"
+        debug_log << "tag,seq,ts_us,flags,raw_xy_only,raw_format,n_raw,raw_stride,raw_count_calc,"
                      "n_kp,kp_desc_len,kp_has_id,imu_ts,imu_ts_us,raw_bytes,events,"
                      "base_us,end_us,total_dt,stamp_ns,checksum_failures,resyncs,queue_drops,"
                      "non_monotonic,status\n";
@@ -849,7 +930,7 @@ void DataProviderRt1060::readerLoop()
         return;
       }
 
-      const size_t raw_stride = pkt.raw_xy_only ? 4u : 6u;
+      const size_t raw_stride = rt1060RawStride(pkt.raw_xy_only, pkt.raw_format);
       const size_t raw_count_calc = (raw_stride > 0u)
         ? (pkt.raw_bytes.size() / raw_stride)
         : 0u;
@@ -859,6 +940,7 @@ void DataProviderRt1060::readerLoop()
                 << pkt.ts_us << ",0x"
                 << std::hex << static_cast<int>(pkt.flags) << std::dec << ','
                 << static_cast<int>(pkt.raw_xy_only) << ','
+                << static_cast<int>(pkt.raw_format) << ','
                 << pkt.n_raw << ','
                 << raw_stride << ','
                 << raw_count_calc << ','
@@ -909,8 +991,8 @@ void DataProviderRt1060::readerLoop()
       while (running_)
       {
         Rt1060Packet pkt;
-        const ParseResult res = try_parse_packet(buffer, &pkt, &stats);
-        if (res == ParseResult::Parsed)
+        const Rt1060ParseResult res = rt1060TryParsePacket(buffer, &pkt, &stats, parse_cfg);
+        if (res == Rt1060ParseResult::Parsed)
         {
           stats.packets_parsed++;
           if (debug_log_active)
@@ -937,7 +1019,7 @@ void DataProviderRt1060::readerLoop()
           Rt1060EventDebug debug_info;
           const bool debug_enabled = debug_packets_;
           const bool want_debug_info = debug_enabled || debug_log_active;
-          const bool decoded = decode_events(
+          const bool decoded = rt1060DecodeEvents(
             pkt,
             decode_cfg,
             &events,
@@ -1008,6 +1090,7 @@ void DataProviderRt1060::readerLoop()
                         << " ts_us=" << pkt.ts_us
                         << " flags=0x" << std::hex << static_cast<int>(pkt.flags) << std::dec
                         << " raw_xy_only=" << pkt.raw_xy_only
+                        << " raw_format=" << static_cast<int>(pkt.raw_format)
                         << " n_raw=" << pkt.n_raw
                         << " n_kp=" << pkt.n_kp
                         << " kp_desc_len=" << static_cast<int>(pkt.kp_desc_len)
@@ -1040,7 +1123,7 @@ void DataProviderRt1060::readerLoop()
           enqueueSlice(std::move(slice));
           continue;
         }
-        if (res == ParseResult::Resync)
+        if (res == Rt1060ParseResult::Resync)
         {
           continue;
         }

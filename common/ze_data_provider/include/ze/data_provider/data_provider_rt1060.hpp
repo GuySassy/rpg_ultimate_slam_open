@@ -23,6 +23,12 @@ enum class Rt1060TsAnchor {
   End
 };
 
+enum class Rt1060RawFormat {
+  Auto,
+  Compact,
+  Full
+};
+
 //! RT1060 serial data provider (events + optional firmware keypoints).
 class DataProviderRt1060 : public DataProviderBase
 {
@@ -36,6 +42,7 @@ public:
                      int xy_only_window_us,
                      int xy_only_polarity,
                      Rt1060TsAnchor ts_anchor,
+                     Rt1060RawFormat raw_format,
                      int log_stats_interval_s,
                      bool debug_packets,
                      int debug_every_n_packets,
@@ -66,6 +73,7 @@ private:
   int xy_only_window_us_ = 3000;
   bool xy_only_polarity_ = true;
   Rt1060TsAnchor ts_anchor_ = Rt1060TsAnchor::End;
+  Rt1060RawFormat raw_format_ = Rt1060RawFormat::Auto;
   int log_stats_interval_s_ = 5;
   bool debug_packets_ = false;
   int debug_every_n_packets_ = 200;

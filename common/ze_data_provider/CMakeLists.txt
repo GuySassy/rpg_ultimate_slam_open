@@ -16,6 +16,7 @@ set(HEADERS
   include/ze/data_provider/data_provider_rosbag.hpp
   include/ze/data_provider/data_provider_rostopic.hpp
   include/ze/data_provider/data_provider_rt1060.hpp
+  include/ze/data_provider/rt1060_parser.hpp
   include/ze/data_provider/camera_imu_synchronizer_base.hpp
   include/ze/data_provider/camera_imu_synchronizer.hpp
   )
@@ -65,6 +66,9 @@ target_link_libraries(test_data_provider ${PROJECT_NAME})
 
 catkin_add_gtest(test_camera_imu_synchronizer test/test_camera_imu_synchronizer.cpp)
 target_link_libraries(test_camera_imu_synchronizer ${PROJECT_NAME})
+
+catkin_add_gtest(test_rt1060_parser test/test_rt1060_parser.cpp)
+target_link_libraries(test_rt1060_parser ${PROJECT_NAME})
 
 ##########
 # EXPORT #

@@ -9,6 +9,7 @@ mode. Packet-only timestamps or XY-only points are not faithful for SLAM.
 ## Firmware modes supported
 From `third_party/RT1060_newest/py_evtelemetry.c`:
 - RAW (compact): `x_u16, y_u16, pol_dt_u16`
+- RAW (full): `raw_u16, unused_u16, dt_ticks_u16, pol_u16, x_u16, y_u16`
 - RAW_XY_ONLY: `x_u16, y_u16`
 - KP: keypoints with descriptor bytes
 - KP_ID: optional keypoint `id_u16`
@@ -20,6 +21,12 @@ From `third_party/RT1060_newest/py_evtelemetry.c`:
 Compact raw (default):
 - Per-event timestamps reconstructed by accumulating `dt`.
 - Anchor selection: `--rt1060_ts_anchor=start|end` (default `end`).
+
+Full raw (optional):
+- Per-event timestamps reconstructed from 24 MHz `dt_ticks`.
+- Enable/override format selection with:
+  - `--rt1060_raw_format=auto|compact|full`
+  - scripts accept `RT1060_RAW_FORMAT=full` to override.
 
 RAW_XY_ONLY (test-only):
 - Parsed always, but **not emitted as events** unless synth is enabled.
