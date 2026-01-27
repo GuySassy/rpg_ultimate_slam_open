@@ -48,10 +48,18 @@ constexpr size_t kMaxKeypoints = 512;
 constexpr size_t kMaxRawEvents = 16384;
 constexpr size_t kMaxDescLen = 128;
 constexpr size_t kMaxPacketBytes = 256 * 1024;
+// RT1060 protocol: accel in g*1024, gyro in LSM6DSO raw (8.75 mdps/LSB).
+constexpr double kAccelScale = 9.81 / 1024.0;
+constexpr double kGyroScale = 0.00875 * (3.14159265358979323846 / 180.0);
 
 uint16_t read_le_u16(const uint8_t* data)
 {
   return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
+}
+
+int16_t read_le_i16(const uint8_t* data)
+{
+  return static_cast<int16_t>(read_le_u16(data));
 }
 
 uint32_t read_le_u32(const uint8_t* data)
@@ -263,7 +271,10 @@ Rt1060ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
     return Rt1060ParseResult::Resync;
   }
 
-  const size_t kp_stride = has_kp ? (static_cast<size_t>(kp_has_id ? 10 : 8) + kp_desc_len) : 0u;
+  const size_t kp_base = (version >= 2) ? 10u : 8u;
+  const size_t kp_stride = has_kp
+    ? (kp_base + static_cast<size_t>(kp_has_id ? 2 : 0) + kp_desc_len)
+    : 0u;
   const size_t kp_bytes = has_kp ? (static_cast<size_t>(n_kp) * kp_stride) : 0u;
   const size_t raw_stride = rt1060RawStride(raw_xy_only, raw_format);
   const size_t raw_bytes = has_raw ? (static_cast<size_t>(n_raw) * raw_stride) : 0u;
@@ -323,6 +334,8 @@ Rt1060ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
   pkt.raw_format = raw_format;
   pkt.raw_xy_only = raw_xy_only;
   pkt.kp_has_id = kp_has_id;
+  pkt.has_accel = has_accel;
+  pkt.has_imu = has_imu;
   pkt.has_imu_ts = has_imu_ts;
 
   size_t offset = kMagicSize + kHeaderSize;
@@ -342,10 +355,16 @@ Rt1060ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
   }
   if (has_accel)
   {
+    pkt.accel_raw[0] = read_le_i16(buffer.data() + offset);
+    pkt.accel_raw[1] = read_le_i16(buffer.data() + offset + 2);
+    pkt.accel_raw[2] = read_le_i16(buffer.data() + offset + 4);
     offset += 6u;
   }
   if (has_imu)
   {
+    pkt.gyro_raw[0] = read_le_i16(buffer.data() + offset);
+    pkt.gyro_raw[1] = read_le_i16(buffer.data() + offset + 2);
+    pkt.gyro_raw[2] = read_le_i16(buffer.data() + offset + 4);
     offset += 6u;
   }
   if (has_imu_ts)
@@ -603,8 +622,10 @@ bool decode_keypoints(const Rt1060Packet& pkt, elis_link::KeypointPacket* packet
   {
     return false;
   }
-  const size_t base = pkt.kp_has_id ? 10u : 8u;
-  const size_t stride = base + static_cast<size_t>(pkt.kp_desc_len);
+  const bool score_u32 = (pkt.version >= 2);
+  const size_t base = score_u32 ? 10u : 8u;
+  const size_t stride = base + static_cast<size_t>(pkt.kp_has_id ? 2 : 0)
+                        + static_cast<size_t>(pkt.kp_desc_len);
   if (stride == 0 || (pkt.kp_bytes.size() % stride) != 0)
   {
     return false;
@@ -636,20 +657,24 @@ bool decode_keypoints(const Rt1060Packet& pkt, elis_link::KeypointPacket* packet
   {
     const uint16_t x = read_le_u16(data);
     const uint16_t y = read_le_u16(data + 2);
-    const uint16_t score = read_le_u16(data + 4);
-    const uint16_t angle = read_le_u16(data + 6);
-    (void)angle;
+    const float score = score_u32
+      ? static_cast<float>(read_le_u32(data + 4))
+      : static_cast<float>(read_le_u16(data + 4));
+    size_t offset = score_u32 ? 8u : 6u;
     int32_t track_id = static_cast<int32_t>(i);
-    size_t desc_offset = 8;
     if (pkt.kp_has_id)
     {
-      track_id = static_cast<int32_t>(read_le_u16(data + 8));
-      desc_offset = 10;
+      track_id = static_cast<int32_t>(read_le_u16(data + offset));
+      offset += 2u;
     }
+    const uint16_t angle = read_le_u16(data + offset);
+    (void)angle;
+    offset += 2u;
+    const size_t desc_offset = offset;
 
     packet.x_px.push_back(static_cast<float>(x));
     packet.y_px.push_back(static_cast<float>(y));
-    packet.strength.push_back(static_cast<float>(score));
+    packet.strength.push_back(score);
     packet.track_ids.push_back(track_id);
 
     if (pkt.kp_desc_len > 0)
@@ -738,6 +763,10 @@ struct DataProviderRt1060::SliceData
 {
   EventArrayPtr events;
   int64_t stamp_ns = 0;
+  bool has_imu = false;
+  int64_t imu_stamp_ns = 0;
+  Vector3 acc = Vector3::Zero();
+  Vector3 gyr = Vector3::Zero();
 #ifdef ELIS_LINK_ENABLED
   elis_link::KeypointPacket packet;
   bool has_packet = false;
@@ -759,12 +788,14 @@ DataProviderRt1060::DataProviderRt1060(const std::string& port,
                                        int debug_every_n_packets,
                                        const std::string& debug_log_path,
                                        int debug_log_max_lines,
-                                       int debug_log_flush_every)
+                                       int debug_log_flush_every,
+                                       size_t imu_count)
   : DataProviderBase(DataProviderType::Rt1060)
   , port_(port)
   , baud_(baud)
   , use_firmware_keypoints_(use_firmware_keypoints)
   , drop_empty_raw_(drop_empty_raw)
+  , imu_count_(imu_count)
   , queue_size_(std::max(1, queue_size))
   , allow_xy_only_synth_(allow_xy_only_synth)
   , xy_only_window_us_(std::max(0, xy_only_window_us))
@@ -778,6 +809,11 @@ DataProviderRt1060::DataProviderRt1060(const std::string& port,
   , debug_log_max_lines_(debug_log_max_lines)
   , debug_log_flush_every_(std::max(1, debug_log_flush_every))
 {
+  if (imu_count_ > 1u)
+  {
+    LOG(WARNING) << "[RT1060] Only one IMU is supported; clamping --num_imus to 1.";
+    imu_count_ = 1u;
+  }
   reader_thread_ = std::thread(&DataProviderRt1060::readerLoop, this);
 }
 
@@ -850,6 +886,23 @@ bool DataProviderRt1060::spinOnce()
     elis_link::cache_packet(slice.stamp_ns, std::move(slice.packet));
   }
 #endif
+
+  if (slice.has_imu)
+  {
+    if (imu_callback_)
+    {
+      imu_callback_(slice.imu_stamp_ns, slice.acc, slice.gyr, 0u);
+    }
+    else
+    {
+      static int warned_no_imu_cb = 0;
+      if (warned_no_imu_cb++ < 1)
+      {
+        LOG(WARNING) << "[RT1060] IMU data received but no IMU callback registered. "
+                        "Set --num_imus>0 to enable IMU processing.";
+      }
+    }
+  }
 
   if (dvs_callback_ && slice.events)
   {
@@ -1056,6 +1109,34 @@ void DataProviderRt1060::readerLoop()
           slice.events = std::move(events);
           // Match frontend cached-packet lookup key: events.back().ts.toNSec().
           slice.stamp_ns = stamp_ns;
+          if (pkt.has_accel || pkt.has_imu)
+          {
+            slice.has_imu = true;
+            uint32_t imu_ts_us = pkt.has_imu_ts ? pkt.imu_ts_us : pkt.ts_us;
+            if (imu_ts_us == 0u)
+            {
+              imu_ts_us = pkt.ts_us;
+            }
+            slice.imu_stamp_ns = static_cast<int64_t>(imu_ts_us) * 1000;
+            const real_t accel_scale = static_cast<real_t>(kAccelScale);
+            const real_t gyro_scale = static_cast<real_t>(kGyroScale);
+            Vector3 acc = Vector3::Zero();
+            Vector3 gyr = Vector3::Zero();
+            if (pkt.has_accel)
+            {
+              acc.x() = static_cast<real_t>(pkt.accel_raw[0]) * accel_scale;
+              acc.y() = static_cast<real_t>(pkt.accel_raw[1]) * accel_scale;
+              acc.z() = static_cast<real_t>(pkt.accel_raw[2]) * accel_scale;
+            }
+            if (pkt.has_imu)
+            {
+              gyr.x() = static_cast<real_t>(pkt.gyro_raw[0]) * gyro_scale;
+              gyr.y() = static_cast<real_t>(pkt.gyro_raw[1]) * gyro_scale;
+              gyr.z() = static_cast<real_t>(pkt.gyro_raw[2]) * gyro_scale;
+            }
+            slice.acc = acc;
+            slice.gyr = gyr;
+          }
 
           const bool non_monotonic = (last_stamp_ns >= 0 && stamp_ns <= last_stamp_ns);
           if (debug_enabled && non_monotonic)

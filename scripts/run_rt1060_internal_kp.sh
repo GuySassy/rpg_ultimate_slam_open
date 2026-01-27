@@ -25,7 +25,7 @@ ${RUN_CMD} \
   --vio_use_events_and_images=false \
   --vio_use_elis_link=false \
   --vio_descriptor_use_dummy="${VIO_DESCRIPTOR_USE_DUMMY}" \
-  --num_imus=0 \
+  --num_imus=1 \
   --calib_filename="${CALIB_FILE}" \
   ${LOG_FLAGS} \
   ${EXTRA_FLAGS}

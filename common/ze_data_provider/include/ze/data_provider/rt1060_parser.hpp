@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -38,8 +39,12 @@ struct Rt1060Packet
   uint8_t raw_format = 0;
   bool raw_xy_only = false;
   bool kp_has_id = false;
+  bool has_accel = false;
+  bool has_imu = false;
   bool has_imu_ts = false;
   uint32_t imu_ts_us = 0;
+  std::array<int16_t, 3> accel_raw{{0, 0, 0}};
+  std::array<int16_t, 3> gyro_raw{{0, 0, 0}};
   std::vector<uint8_t> kp_bytes;
   std::vector<uint8_t> raw_bytes;
 };

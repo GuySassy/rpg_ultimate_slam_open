@@ -256,7 +256,8 @@ DataProviderBase::Ptr loadDataProviderFromGflags(const uint32_t num_cams)
         FLAGS_rt1060_debug_every_n_packets,
         FLAGS_rt1060_debug_log_path,
         FLAGS_rt1060_debug_log_max_lines,
-        FLAGS_rt1060_debug_log_flush_every));
+        FLAGS_rt1060_debug_log_flush_every,
+        static_cast<size_t>(FLAGS_num_imus)));
       break;
     }
     default:

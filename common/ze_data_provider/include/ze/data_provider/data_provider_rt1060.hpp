@@ -48,13 +48,14 @@ public:
                      int debug_every_n_packets,
                      const std::string& debug_log_path,
                      int debug_log_max_lines,
-                     int debug_log_flush_every);
+                     int debug_log_flush_every,
+                     size_t imu_count);
   ~DataProviderRt1060() override;
 
   bool spinOnce() override;
   bool ok() const override;
 
-  size_t imuCount() const override { return 0u; }
+  size_t imuCount() const override { return imu_count_; }
   size_t cameraCount() const override { return 0u; }
   size_t dvsCount() const override { return 1u; }
 
@@ -68,6 +69,7 @@ private:
   int baud_ = 115200;
   bool use_firmware_keypoints_ = false;
   bool drop_empty_raw_ = true;
+  size_t imu_count_ = 0u;
   int queue_size_ = 2;
   bool allow_xy_only_synth_ = false;
   int xy_only_window_us_ = 3000;
