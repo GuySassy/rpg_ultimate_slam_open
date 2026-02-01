@@ -67,6 +67,8 @@ public:
 
   virtual size_t cameraCount() const;
 
+  virtual size_t dvsCount() const { return 0u; }
+
   inline size_t size() const
   {
     return buffer_.size();

@@ -163,6 +163,27 @@ bool Estimator::addStates(
   else
   {
     last_timestamp = states_.timestamps.back();
+    if (imu_stamps.rows() < 2)
+    {
+      LOG(WARNING) << "Insufficient IMU samples for propagation: "
+                   << imu_stamps.rows();
+      return false;
+    }
+    if (imu_stamps[0] > last_timestamp)
+    {
+      LOG(WARNING) << "IMU stamps start after last frame timestamp; skipping propagation.";
+      return false;
+    }
+    if (imu_stamps[0] > timestamp)
+    {
+      LOG(WARNING) << "IMU stamps start after frame timestamp; skipping propagation.";
+      return false;
+    }
+    if (last_timestamp >= timestamp)
+    {
+      LOG(WARNING) << "Non-monotonic frame timestamps; skipping propagation.";
+      return false;
+    }
     // get the previous states
     BackendId T_WS_id = states_.ids.back();
     BackendId speed_and_bias_id = changeIdType(T_WS_id, IdType::ImuStates);
@@ -1396,4 +1417,3 @@ bool Estimator::setSpeedAndBiasEstimate(BackendId id, const SpeedAndBias& sab)
 }
 
 }  // namespace ze
-

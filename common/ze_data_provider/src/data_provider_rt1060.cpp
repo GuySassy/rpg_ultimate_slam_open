@@ -253,7 +253,7 @@ Rt1060ParseResult try_parse_packet(std::vector<uint8_t>& buffer,
   uint8_t raw_format = hdr[13];
   raw_format = rt1060NormalizeRawFormat(raw_format, cfg.raw_format);
 
-  const bool has_raw = (flags & kFlagHasRaw) != 0;
+  const bool has_raw = ((flags & kFlagHasRaw) != 0) || (n_raw > 0);
   const bool has_kp = (flags & kFlagHasKp) != 0;
   const bool has_imu = (flags & kFlagHasImu) != 0;
   const bool has_accel = (flags & kFlagHasAccel) != 0;
@@ -764,9 +764,9 @@ struct DataProviderRt1060::SliceData
   EventArrayPtr events;
   int64_t stamp_ns = 0;
   bool has_imu = false;
-  int64_t imu_stamp_ns = 0;
-  Vector3 acc = Vector3::Zero();
-  Vector3 gyr = Vector3::Zero();
+  std::vector<int64_t> imu_stamps_ns;
+  std::vector<Vector3> acc;
+  std::vector<Vector3> gyr;
 #ifdef ELIS_LINK_ENABLED
   elis_link::KeypointPacket packet;
   bool has_packet = false;
@@ -891,7 +891,13 @@ bool DataProviderRt1060::spinOnce()
   {
     if (imu_callback_)
     {
-      imu_callback_(slice.imu_stamp_ns, slice.acc, slice.gyr, 0u);
+      const size_t n = slice.imu_stamps_ns.size();
+      for (size_t i = 0; i < n; ++i)
+      {
+        const Vector3& acc = (i < slice.acc.size()) ? slice.acc[i] : slice.acc.back();
+        const Vector3& gyr = (i < slice.gyr.size()) ? slice.gyr[i] : slice.gyr.back();
+        imu_callback_(slice.imu_stamps_ns[i], acc, gyr, 0u);
+      }
     }
     else
     {
@@ -1048,13 +1054,64 @@ void DataProviderRt1060::readerLoop()
         if (res == Rt1060ParseResult::Parsed)
         {
           stats.packets_parsed++;
+          if (debug_packets_)
+          {
+            static int warned_flags = 0;
+            if (warned_flags++ < 50)
+            {
+              LOG(INFO) << "[RT1060][hdr] seq=" << pkt.seq
+                        << " flags=0x" << std::hex << static_cast<int>(pkt.flags) << std::dec
+                        << " n_raw=" << pkt.n_raw
+                        << " raw_bytes=" << pkt.raw_bytes.size()
+                        << " raw_format=" << static_cast<int>(pkt.raw_format)
+                        << " raw_xy_only=" << pkt.raw_xy_only
+                        << " imu_ts=" << pkt.has_imu_ts
+                        << " imu_ts_us=" << pkt.imu_ts_us;
+            }
+          }
           if (debug_log_active)
           {
             ++debug_log_packets;
           }
-          if (drop_empty_raw_ && !(pkt.flags & kFlagHasRaw))
+          if (drop_empty_raw_ && !(pkt.flags & kFlagHasRaw) &&
+              (pkt.n_raw == 0 || pkt.raw_bytes.empty()))
           {
-            if (debug_log_active)
+            if (pkt.has_accel || pkt.has_imu)
+            {
+              const real_t accel_scale = static_cast<real_t>(kAccelScale);
+              const real_t gyro_scale = static_cast<real_t>(kGyroScale);
+              Vector3 acc = Vector3::Zero();
+              Vector3 gyr = Vector3::Zero();
+              if (pkt.has_accel)
+              {
+                acc.x() = static_cast<real_t>(pkt.accel_raw[0]) * accel_scale;
+                acc.y() = static_cast<real_t>(pkt.accel_raw[1]) * accel_scale;
+                acc.z() = static_cast<real_t>(pkt.accel_raw[2]) * accel_scale;
+              }
+              if (pkt.has_imu)
+              {
+                gyr.x() = static_cast<real_t>(pkt.gyro_raw[0]) * gyro_scale;
+                gyr.y() = static_cast<real_t>(pkt.gyro_raw[1]) * gyro_scale;
+                gyr.z() = static_cast<real_t>(pkt.gyro_raw[2]) * gyro_scale;
+              }
+              uint32_t imu_ts_us = pkt.has_imu_ts ? pkt.imu_ts_us : pkt.ts_us;
+              if (imu_ts_us == 0u)
+              {
+                imu_ts_us = pkt.ts_us;
+              }
+              imu_assigner_.addSample(static_cast<int64_t>(imu_ts_us) * 1000, acc, gyr);
+              if (debug_log_active)
+              {
+                Rt1060EventDebug imu_info;
+                imu_info.count = 0;
+                imu_info.total_dt = 0;
+                imu_info.base_us = static_cast<int64_t>(pkt.ts_us);
+                imu_info.end_us = static_cast<int64_t>(pkt.ts_us);
+                imu_info.xy_only = pkt.raw_xy_only;
+                write_debug_line("imu_only", pkt, imu_info, -1, false, "imu_only");
+              }
+            }
+            else if (debug_log_active)
             {
               Rt1060EventDebug drop_info;
               drop_info.count = 0;
@@ -1071,7 +1128,7 @@ void DataProviderRt1060::readerLoop()
           int64_t stamp_ns = -1;
           Rt1060EventDebug debug_info;
           const bool debug_enabled = debug_packets_;
-          const bool want_debug_info = debug_enabled || debug_log_active;
+          const bool want_debug_info = debug_enabled || debug_log_active || (imu_count_ > 0u);
           const bool decoded = rt1060DecodeEvents(
             pkt,
             decode_cfg,
@@ -1111,13 +1168,6 @@ void DataProviderRt1060::readerLoop()
           slice.stamp_ns = stamp_ns;
           if (pkt.has_accel || pkt.has_imu)
           {
-            slice.has_imu = true;
-            uint32_t imu_ts_us = pkt.has_imu_ts ? pkt.imu_ts_us : pkt.ts_us;
-            if (imu_ts_us == 0u)
-            {
-              imu_ts_us = pkt.ts_us;
-            }
-            slice.imu_stamp_ns = static_cast<int64_t>(imu_ts_us) * 1000;
             const real_t accel_scale = static_cast<real_t>(kAccelScale);
             const real_t gyro_scale = static_cast<real_t>(kGyroScale);
             Vector3 acc = Vector3::Zero();
@@ -1134,9 +1184,43 @@ void DataProviderRt1060::readerLoop()
               gyr.y() = static_cast<real_t>(pkt.gyro_raw[1]) * gyro_scale;
               gyr.z() = static_cast<real_t>(pkt.gyro_raw[2]) * gyro_scale;
             }
-            slice.acc = acc;
-            slice.gyr = gyr;
+            uint32_t imu_ts_us = pkt.has_imu_ts ? pkt.imu_ts_us : pkt.ts_us;
+            if (imu_ts_us == 0u)
+            {
+              imu_ts_us = pkt.ts_us;
+            }
+            imu_assigner_.addSample(static_cast<int64_t>(imu_ts_us) * 1000, acc, gyr);
           }
+
+          if (!imu_assigner_.empty())
+          {
+            int64_t start_ns = last_event_stamp_ns_;
+            if (start_ns < 0)
+            {
+              if (debug_info.total_dt > 0)
+              {
+                start_ns = stamp_ns - static_cast<int64_t>(debug_info.total_dt) * 1000;
+              }
+              else
+              {
+                start_ns = stamp_ns - 2000000;
+              }
+            }
+            if (start_ns < 0)
+            {
+              start_ns = 0;
+            }
+            Rt1060ImuAssigned assigned = imu_assigner_.assign(start_ns, stamp_ns);
+            if (assigned.stamps_ns.size() >= 2)
+            {
+              slice.has_imu = true;
+              slice.imu_stamps_ns = std::move(assigned.stamps_ns);
+              slice.acc = std::move(assigned.acc);
+              slice.gyr = std::move(assigned.gyr);
+            }
+          }
+
+          last_event_stamp_ns_ = stamp_ns;
 
           const bool non_monotonic = (last_stamp_ns >= 0 && stamp_ns <= last_stamp_ns);
           if (debug_enabled && non_monotonic)

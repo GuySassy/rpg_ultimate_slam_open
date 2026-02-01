@@ -2,7 +2,7 @@ project(ze_data_provider)
 cmake_minimum_required(VERSION 2.8.3)
 
 find_package(catkin_simple REQUIRED)
-catkin_simple()
+catkin_simple(DEPENDS ze_vio_common)
 
 include(ze_setup)
 
@@ -16,6 +16,7 @@ set(HEADERS
   include/ze/data_provider/data_provider_rosbag.hpp
   include/ze/data_provider/data_provider_rostopic.hpp
   include/ze/data_provider/data_provider_rt1060.hpp
+  include/ze/data_provider/rt1060_imu_assigner.hpp
   include/ze/data_provider/rt1060_parser.hpp
   include/ze/data_provider/camera_imu_synchronizer_base.hpp
   include/ze/data_provider/camera_imu_synchronizer.hpp
@@ -28,6 +29,7 @@ set(SOURCES
   src/data_provider_rosbag.cpp
   src/data_provider_rostopic.cpp
   src/data_provider_rt1060.cpp
+  src/rt1060_imu_assigner.cpp
   src/camera_imu_synchronizer.cpp
   src/camera_imu_synchronizer_base.cpp
   )
@@ -54,7 +56,7 @@ if(ELIS_LINK_ROOT_DIR)
 endif()
 find_library(ELIS_LINK_CORE_LIB NAMES elis_link_core PATHS ${ELIS_LINK_LIB_HINTS})
 if(ELIS_LINK_CORE_LIB AND ELIS_LINK_INCLUDE_DIR)
-  target_link_libraries(${PROJECT_NAME} ${ELIS_LINK_CORE_LIB})
+  target_link_libraries(${PROJECT_NAME} ${ELIS_LINK_CORE_LIB} ${catkin_LIBRARIES})
   target_compile_definitions(${PROJECT_NAME} PRIVATE ELIS_LINK_ENABLED)
 endif()
 
@@ -69,6 +71,9 @@ target_link_libraries(test_camera_imu_synchronizer ${PROJECT_NAME})
 
 catkin_add_gtest(test_rt1060_parser test/test_rt1060_parser.cpp)
 target_link_libraries(test_rt1060_parser ${PROJECT_NAME})
+
+catkin_add_gtest(test_rt1060_imu_assigner test/test_rt1060_imu_assigner.cpp)
+target_link_libraries(test_rt1060_imu_assigner ${PROJECT_NAME})
 
 ##########
 # EXPORT #

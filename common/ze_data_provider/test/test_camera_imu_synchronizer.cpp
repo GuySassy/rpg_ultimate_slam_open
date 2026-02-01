@@ -27,6 +27,7 @@
 
 #include <string>
 #include <iostream>
+#include <cstdlib>
 
 #include <imp/core/image_base.hpp>
 #include <imp/core/image_raw.hpp>
@@ -54,6 +55,10 @@ public:
   {
     return camera_count_;
   }
+  virtual size_t dvsCount() const
+  {
+    return 0u;
+  }
   size_t imu_count_;
   size_t camera_count_;
 };
@@ -63,11 +68,15 @@ TEST(CameraImuSynchronizerTest, testCsv)
 {
   using namespace ze;
 
+  if (!std::getenv("ZE_TEST_DATA_PATH"))
+  {
+    GTEST_SKIP() << "ZE_TEST_DATA_PATH not set; skipping camera/IMU CSV test.";
+  }
   std::string data_dir = getTestDataDir("csv_dataset");
   EXPECT_FALSE(data_dir.empty());
 
   DataProviderCsv dp(data_dir+"/data", {{"imu0", 0}}, {{"cam0", 0}});
-  CameraImuSynchronizer sync(dp);
+  CameraImuSynchronizer sync(dp, false, false);
   sync.registerCameraImuCallback(
         [&](const StampedImages& images,
             const ImuStampsVector& imu_timestamps,
@@ -94,7 +103,7 @@ TEST(CameraImuSynchronizerTest, testCameraOnlyPublishesFullFrames)
   data_provider.camera_count_ = 2;
   data_provider.imu_count_ = 0;
 
-  CameraImuSynchronizer sync(data_provider);
+  CameraImuSynchronizer sync(data_provider, false, false);
 
   size_t measurements = 0u;
   sync.registerCameraImuCallback(
@@ -130,7 +139,7 @@ TEST(CameraImuSynchronizerTest, testCameraOnlyPublishesWithImu)
   data_provider.camera_count_ = 1;
   data_provider.imu_count_ = 1;
 
-  CameraImuSynchronizer sync(data_provider);
+  CameraImuSynchronizer sync(data_provider, false, false);
 
   size_t measurements = 0u;
   sync.registerCameraImuCallback(
@@ -169,7 +178,7 @@ TEST(CameraImuSynchronizerTest, testImagesAreDiscardedIfFramesInconsistent)
   data_provider.camera_count_ = 2;
   data_provider.imu_count_ = 0;
 
-  CameraImuSynchronizer sync(data_provider);
+  CameraImuSynchronizer sync(data_provider, false, false);
 
   size_t measurements = 0u;
   sync.registerCameraImuCallback(
@@ -211,7 +220,7 @@ TEST(CameraImuSynchronizerTest, testImagesAreDiscardedIfNoImuBefore)
   data_provider.camera_count_ = 1;
   data_provider.imu_count_ = 1;
 
-  CameraImuSynchronizer sync(data_provider);
+  CameraImuSynchronizer sync(data_provider, false, false);
 
   size_t measurements = 0u;
   sync.registerCameraImuCallback(
@@ -244,7 +253,7 @@ TEST(CameraImuSynchronizerTest, testImagesAreDiscardedIfNoImuAfter)
   data_provider.camera_count_ = 1;
   data_provider.imu_count_ = 1;
 
-  CameraImuSynchronizer sync(data_provider);
+  CameraImuSynchronizer sync(data_provider, false, false);
 
   size_t measurements = 0u;
   sync.registerCameraImuCallback(

@@ -27,6 +27,7 @@
 
 #include <string>
 #include <iostream>
+#include <cstdlib>
 
 #include <ze/common/test_entrypoint.hpp>
 #include <ze/common/test_utils.hpp>
@@ -39,6 +40,10 @@ TEST(DataProviderTests, testCsv)
 {
   using namespace ze;
 
+  if (!std::getenv("ZE_TEST_DATA_PATH"))
+  {
+    GTEST_SKIP() << "ZE_TEST_DATA_PATH not set; skipping data provider CSV test.";
+  }
   std::string data_dir = getTestDataDir("csv_dataset");
   EXPECT_FALSE(data_dir.empty());
 
@@ -80,12 +85,17 @@ TEST(DataProviderTests, testRosbag)
 {
   using namespace ze;
 
+  if (!std::getenv("ZE_TEST_DATA_PATH"))
+  {
+    GTEST_SKIP() << "ZE_TEST_DATA_PATH not set; skipping data provider rosbag test.";
+  }
   std::string data_dir = getTestDataDir("rosbag_euroc_snippet");
   std::string bag_filename = joinPath(data_dir, "dataset.bag");
   ASSERT_TRUE(fileExists(bag_filename));
 
   DataProviderRosbag dp(bag_filename, {{"/imu0", 0}}, { {"/cam0/image_raw", 0},
-                                                        {"/cam1/image_raw", 1} });
+                                                        {"/cam1/image_raw", 1} },
+                        {});
 
   size_t num_imu_measurements = 0u;
   dp.registerImuCallback(
@@ -122,12 +132,17 @@ TEST(DataProviderTests, testRosbagCamOnly)
 {
   using namespace ze;
 
+  if (!std::getenv("ZE_TEST_DATA_PATH"))
+  {
+    GTEST_SKIP() << "ZE_TEST_DATA_PATH not set; skipping data provider rosbag camera-only test.";
+  }
   std::string data_dir = getTestDataDir("rosbag_euroc_snippet");
   std::string bag_filename = joinPath(data_dir, "dataset.bag");
   ASSERT_TRUE(fileExists(bag_filename));
 
   DataProviderRosbag dp(bag_filename, {}, { {"/cam0/image_raw", 0},
-                                            {"/cam1/image_raw", 1} });
+                                            {"/cam1/image_raw", 1} },
+                        {});
 
   size_t num_imu_measurements = 0u;
   dp.registerImuCallback(

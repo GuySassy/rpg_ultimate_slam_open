@@ -15,6 +15,7 @@
 #include <thread>
 
 #include <ze/data_provider/data_provider_base.hpp>
+#include <ze/data_provider/rt1060_imu_assigner.hpp>
 
 namespace ze {
 
@@ -82,6 +83,8 @@ private:
   std::string debug_log_path_;
   int debug_log_max_lines_ = 2000;
   int debug_log_flush_every_ = 20;
+  int64_t last_event_stamp_ns_ = -1;
+  Rt1060ImuAssigner imu_assigner_;
 
   std::thread reader_thread_;
   std::atomic<bool> reader_done_{false};

@@ -689,12 +689,13 @@ void FrontendBase::processData(
   // Add new imu messages to members imu_*_since_lkf_
   CHECK(!imu_stamps_vec.empty()) << "There are no IMU stamps";
   CHECK(!imu_accgyr_vec.empty()) << "There are no IMU measurements";
+  bool imu_ok = true;
   if (!addImuMeasurementsBetweenKeyframes(imu_stamps_vec.at(0),
                                           imu_accgyr_vec.at(0))
       && FLAGS_num_imus > 0)
   {
-    LOG(ERROR) << "Insufficient IMU messages provided.";
-    return;
+    imu_ok = false;
+    LOG(WARNING) << "Insufficient IMU messages provided; continuing without IMU.";
   }
   cleanupInactiveLandmarksFromLastIteration();
 
@@ -738,7 +739,7 @@ void FrontendBase::processData(
   // Predict pose of new frame using IMU:
   Transformation T_Bkm1_Bk;
   // Integrate IMU to current image time stamp
-  if (states_.nframeKm1())
+  if (states_.nframeKm1() && imu_ok)
   {
     if (!imu_stamps_vec.empty() && imu_stamps_vec.at(0).size() > 0)
     {
@@ -798,7 +799,27 @@ void FrontendBase::processData(
       feature_initializer_->extractFeatureDescriptors(*nframe_k);
     }
 
-    if (FLAGS_vio_activate_backend)
+    bool allow_backend = FLAGS_vio_activate_backend;
+    if (!imu_ok || imu_stamps_since_lkf_.size() < 3)
+    {
+      allow_backend = false;
+      static int warned_backend_imu = 0;
+      if (warned_backend_imu++ < 5)
+      {
+        LOG(WARNING) << "Skipping backend update due to insufficient IMU samples.";
+      }
+    }
+    else if (imu_stamps_since_lkf_[0] > nframe_k->timestamp())
+    {
+      allow_backend = false;
+      static int warned_backend_time = 0;
+      if (warned_backend_time++ < 5)
+      {
+        LOG(WARNING) << "Skipping backend update due to IMU stamp after frame time.";
+      }
+    }
+
+    if (allow_backend)
     {
       // Run optimization.
       auto t = timers_[Timer::add_frame_to_backend].timeScope();
@@ -855,12 +876,13 @@ void FrontendBase::processData(
   motion_type_ = VioMotionType::NotComputed;
   CHECK(!imu_stamps_vec.empty()) << "There are no IMU stamps";
   CHECK(!imu_accgyr_vec.empty()) << "There are no IMU measurements";
+  bool imu_ok = true;
   if (!addImuMeasurementsBetweenKeyframes(imu_stamps_vec.at(0),
                                           imu_accgyr_vec.at(0))
       && FLAGS_num_imus > 0)
   {
-    LOG(ERROR) << "No IMU messages provided.";
-    return;
+    imu_ok = false;
+    LOG(WARNING) << "No IMU messages provided; continuing without IMU.";
   }
   cleanupInactiveLandmarksFromLastIteration();
 
@@ -896,7 +918,7 @@ void FrontendBase::processData(
 
   // Predict pose of new frame using IMU:
   Transformation T_Bkm1_Bk;
-  if (states_.nframeKm1())
+  if (states_.nframeKm1() && imu_ok)
   {
     if (!imu_stamps_vec.empty() && imu_stamps_vec.at(0).size() > 0)
     {
@@ -915,8 +937,22 @@ void FrontendBase::processData(
 
   CHECK(rig_->dvs_bearing_lut_.size() > 0) << "Bearing lookup table is empty";
 
-  int64_t t0 = imu_stamps_vec.at(0).head(1)[0];
-  int64_t t1 = imu_stamps_vec.at(0).tail(1)[0];
+  int64_t t0 = 0;
+  int64_t t1 = 0;
+  if (!imu_stamps_vec.empty() && imu_stamps_vec.at(0).size() >= 2)
+  {
+    t0 = imu_stamps_vec.at(0).head(1)[0];
+    t1 = imu_stamps_vec.at(0).tail(1)[0];
+  }
+  else
+  {
+    const EventArrayPtr& events_ptr_fallback = stamped_events.second;
+    if (events_ptr_fallback && !events_ptr_fallback->empty())
+    {
+      t0 = static_cast<int64_t>(events_ptr_fallback->front().ts.toNSec());
+      t1 = static_cast<int64_t>(events_ptr_fallback->back().ts.toNSec());
+    }
+  }
 
   // Create new stamped_images from stamped_events
   cv::Mat event_img = cv::Mat::zeros(rig_->at(0).height(), rig_->at(0).width(), CV_32F);
@@ -1061,7 +1097,27 @@ void FrontendBase::processData(
       }
     }
 
-    if (FLAGS_vio_activate_backend)
+    bool allow_backend = FLAGS_vio_activate_backend;
+    if (!imu_ok || imu_stamps_since_lkf_.size() < 3)
+    {
+      allow_backend = false;
+      static int warned_backend_imu = 0;
+      if (warned_backend_imu++ < 5)
+      {
+        LOG(WARNING) << "Skipping backend update due to insufficient IMU samples.";
+      }
+    }
+    else if (imu_stamps_since_lkf_[0] > nframe_k->timestamp())
+    {
+      allow_backend = false;
+      static int warned_backend_time = 0;
+      if (warned_backend_time++ < 5)
+      {
+        LOG(WARNING) << "Skipping backend update due to IMU stamp after frame time.";
+      }
+    }
+
+    if (allow_backend)
     {
       // Run optimization.
       auto t = timers_[Timer::add_frame_to_backend].timeScope();
@@ -1543,10 +1599,56 @@ bool FrontendBase::addImuMeasurementsBetweenKeyframes(
     const ImuStamps& imu_stamps,
     const ImuAccGyrContainer& imu_accgyr)
 {
+  // Allow sparse IMU during bring-up by padding to at least 3 samples.
+  ImuStamps imu_stamps_local = imu_stamps;
+  ImuAccGyrContainer imu_accgyr_local = imu_accgyr;
+  bool padded_imu = false;
+  if (imu_stamps_local.size() < 3)
+  {
+    static int warned_sparse_imu = 0;
+    if (warned_sparse_imu++ < 5)
+    {
+      LOG(WARNING) << "Sparse IMU samples (" << imu_stamps_local.size()
+                   << "); padding to 3 for bring-up.";
+    }
+
+    const int rows = static_cast<int>(imu_stamps_local.rows());
+    if (rows <= 0)
+    {
+      return false;
+    }
+
+    ImuStamps padded(3);
+    ImuAccGyrContainer padded_accgyr(6, 3);
+    padded_imu = true;
+    if (rows == 1)
+    {
+      const int64_t t0 = imu_stamps_local(0);
+      const int64_t dt = 1000;
+      padded << t0, t0 + dt, t0 + 2 * dt;
+      padded_accgyr.col(0) = imu_accgyr_local.col(0);
+      padded_accgyr.col(1) = imu_accgyr_local.col(0);
+      padded_accgyr.col(2) = imu_accgyr_local.col(0);
+    }
+    else
+    {
+      const int64_t t0 = imu_stamps_local(0);
+      const int64_t t1 = imu_stamps_local(1);
+      const int64_t dt = std::max<int64_t>(1, t1 - t0);
+      padded << t0, t1, t1 + dt;
+      padded_accgyr.col(0) = imu_accgyr_local.col(0);
+      padded_accgyr.col(1) = imu_accgyr_local.col(1);
+      padded_accgyr.col(2) = imu_accgyr_local.col(1);
+    }
+
+    imu_stamps_local = padded;
+    imu_accgyr_local = padded_accgyr;
+  }
+
   // Check that there are at least 3 IMU measurements. This is necessary because
   // later we access the third last element, so better have 3 elements, or we
   // will have a neat seg fault.
-  if (imu_stamps.size() < 3) {
+  if (imu_stamps_local.size() < 3) {
     LOG(ERROR) << "Less than 3 IMU measurements in vector.";
     return false;
   }
@@ -1559,10 +1661,13 @@ bool FrontendBase::addImuMeasurementsBetweenKeyframes(
   {
     // Check that last imu stamp since last key frame is equal to
     // the first imu stamp passed to this function.
-    DEBUG_CHECK_EQ(
-        imu_stamps_since_lkf_[imu_stamps_since_lkf_.size() - 1],
-        imu_stamps[0]
-    );
+    if (imu_stamps_since_lkf_[imu_stamps_since_lkf_.size() - 1] != imu_stamps_local[0])
+    {
+      LOG(WARNING) << "IMU stamp discontinuity detected; resetting IMU buffer.";
+      imu_stamps_since_lkf_ = imu_stamps_local;
+      imu_accgyr_since_lkf_ = imu_accgyr_local;
+      return !padded_imu;
+    }
 
     // TODO: the thing below looks like nonsense to me...
     // ** Detect the case where the first 2 values of the new data are interpolated
@@ -1578,7 +1683,7 @@ bool FrontendBase::addImuMeasurementsBetweenKeyframes(
     // They also do not add the imu_accgyr value corresponding to this stamp to
     // the imu_accgyr_since_lkf_ object, also because it is an interpolated
     // value and not an actual measurement.
-    uint64_t n = imu_stamps.size();
+    uint64_t n = imu_stamps_local.size();
     // The -1 here makes the last element in imu_stamps_since_lkf to be overriden by
     // the first (or second, if first is an interpolation) element in imu_stamps.
     // This makes sense as long as the DEBUG_CHECK_EQ above holds.
@@ -1586,7 +1691,15 @@ bool FrontendBase::addImuMeasurementsBetweenKeyframes(
     uint64_t current_size = imu_stamps_since_lkf_.size();
 
     // Only do the following if there are more than 1 IMU measurement
-    if (imu_stamps.cols() > 1) {
+    if (imu_stamps_local.rows() > 1) {
+      if (current_size < 3)
+      {
+        imu_stamps_since_lkf_.conservativeResize(size_new);
+        imu_accgyr_since_lkf_.conservativeResize(6, size_new);
+        imu_stamps_since_lkf_.tail(n) = imu_stamps_local.tail(n);
+        imu_accgyr_since_lkf_.rightCols(n) = imu_accgyr_local.rightCols(n);
+        return !padded_imu;
+      }
       // **The 2nd and 3rd last elements are never interpolated.**
       // This is actually false when we only have 3 IMU measurements.
       // Below we check whether the fist one is interpolated, and here we say
@@ -1596,14 +1709,14 @@ bool FrontendBase::addImuMeasurementsBetweenKeyframes(
       // interpolation.
       int64_t delta_t_actual = imu_stamps_since_lkf_[current_size - 2] -
           imu_stamps_since_lkf_[current_size - 3];
-      int64_t delta_t_start = imu_stamps[1] - imu_stamps[0];
+      int64_t delta_t_start = imu_stamps_local[1] - imu_stamps_local[0];
 
       // Check that the time difference between the first two IMU measurements is
       // lower or equal to the actual expected IMU sampling period.
       // Interpolations between IMU measurements should not give higher time differences
       // than the sampling period.
       // This check is to ensure that the next "if" is meaningful.
-      LOG(WARNING) << "Number of IMU messages:" << imu_stamps.cols();
+      LOG(WARNING) << "Number of IMU messages:" << imu_stamps_local.rows();
 
       DEBUG_CHECK_LE(delta_t_start, delta_t_actual);
       // **This applies a somewhat arbitrary tolerance on the sampling frequency
@@ -1627,15 +1740,15 @@ bool FrontendBase::addImuMeasurementsBetweenKeyframes(
       //
       imu_stamps_since_lkf_.conservativeResize(size_new);
       imu_accgyr_since_lkf_.conservativeResize(6, size_new);
-      imu_stamps_since_lkf_.tail(n) = imu_stamps.tail(n);
-      imu_accgyr_since_lkf_.rightCols(n) = imu_accgyr.rightCols(n);
+      imu_stamps_since_lkf_.tail(n) = imu_stamps_local.tail(n);
+      imu_accgyr_since_lkf_.rightCols(n) = imu_accgyr_local.rightCols(n);
   }
   else
   {
-    imu_stamps_since_lkf_ = imu_stamps;
-    imu_accgyr_since_lkf_ = imu_accgyr;
+    imu_stamps_since_lkf_ = imu_stamps_local;
+    imu_accgyr_since_lkf_ = imu_accgyr_local;
   }
-  return true;
+  return !padded_imu;
 }
 
 // -----------------------------------------------------------------------------
